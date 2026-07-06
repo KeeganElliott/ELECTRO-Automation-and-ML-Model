@@ -8,3 +8,13 @@ __pycache__/
 # Generated analysis outputs
 results/
 fft_results/
+
+# Temporary test scripts
+test.py
+test2.py
+
+# Non-functional automation script
+electro_bil_phase1_phase2_automation.py
+
+# Non-related files
+geometric_feature_extraction.swp
