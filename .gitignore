@@ -1,20 +1,31 @@
 # Python cache
 __pycache__/
-*.pyc
+*.py[cod]
 
-# Virtual environment
+# Virtual environments
 .venv/
+.venv-*/
+venv/
+env/
 
-# Generated analysis outputs
-results/
-fft_results/
+# Generated ELECTRO data
+Application/ELECTRO_Data_Collected/
+ELECTRO_Data_Collected/
 
-# Temporary test scripts
-test.py
-test2.py
+# IDE settings
+.vscode/
+.idea/
 
-# Non-functional automation script
-electro_bil_phase1_phase2_automation.py
+# Environment files and secrets
+.env
+.env.*
+*.key
 
-# Non-related files
-geometric_feature_extraction.swp
+# Logs and temporary files
+*.log
+*.tmp
+~$*
+
+# Windows files
+Thumbs.db
+desktop.ini
