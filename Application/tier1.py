@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import re
 import sys
 from tkinter import Tk, filedialog
@@ -13,7 +14,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
-    from WaveletAnalysis import extract_zoned_wavelet_features
+    from wavelet_analysis import extract_zoned_wavelet_features
 except Exception as exc:
     extract_zoned_wavelet_features = None
     WAVELET_IMPORT_ERROR = exc
@@ -21,7 +22,7 @@ else:
     WAVELET_IMPORT_ERROR = None
 
 try:
-    from FFT_Analysis import extract_zoned_fft_features
+    from fft_analysis import extract_zoned_fft_features
 except Exception as exc:
     extract_zoned_fft_features = None
     FFT_IMPORT_ERROR = exc
@@ -41,21 +42,111 @@ except AttributeError:
 # USER SETTINGS
 # =========================
 
-Tk().withdraw()
+EXPORT_FILE: Path | None = None
+OUTPUT_FEATURES_XLSX: Path | None = None
+OUTPUT_FEATURES_CSV: Path | None = None
 
-EXPORT_FILE = Path(filedialog.askopenfilename(
-    title="Select ELECTRO export file",
-    filetypes=[
-        ("CSV and TXT files", "*.csv *.txt"),
-        ("All files", "*.*")
-    ]
-))
 
-if not EXPORT_FILE:
-    raise SystemExit("No file selected.")
+def resolve_export_file(
+    export_file: str | Path | None = None,
+) -> Path:
+    """
+    Resolve the ELECTRO export in this order:
 
-OUTPUT_FEATURES_XLSX = EXPORT_FILE.parent / "tier1_input_vector.xlsx"
-OUTPUT_FEATURES_CSV = EXPORT_FILE.parent / "tier1_input_vector.csv"
+    1. A path passed directly to main(export_file=...)
+    2. ELECTRO_EXPORT_FILE set by automation_application.py
+    3. A file picker when tier1.py is run by itself
+
+    This prevents a second file-selection dialog when the main application
+    already selected the ELECTRO export.
+    """
+
+    # Preferred option: direct argument from the main application.
+    if export_file is not None:
+        candidate = Path(export_file).expanduser().resolve()
+
+        if not candidate.exists():
+            raise FileNotFoundError(
+                "The supplied ELECTRO export does not exist:\n"
+                f"{candidate}"
+            )
+
+        return candidate
+
+    # Second option: environment variable supplied by the main application.
+    environment_path = os.environ.get(
+        "ELECTRO_EXPORT_FILE",
+        "",
+    ).strip()
+
+    if environment_path:
+        candidate = Path(environment_path).expanduser().resolve()
+
+        if not candidate.exists():
+            raise FileNotFoundError(
+                "ELECTRO_EXPORT_FILE points to a file that does not exist:\n"
+                f"{candidate}"
+            )
+
+        print("\nUsing ELECTRO export supplied by the main application:")
+        print(candidate)
+
+        return candidate
+
+    # Standalone fallback.
+    root = Tk()
+    root.withdraw()
+
+    try:
+        root.attributes("-topmost", True)
+        root.update()
+
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="Select ELECTRO export file",
+            filetypes=[
+                ("ELECTRO exports", "*.csv *.txt"),
+                ("CSV files", "*.csv"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
+            ],
+        )
+    finally:
+        root.destroy()
+
+    if not selected:
+        raise SystemExit("No ELECTRO export selected.")
+
+    return Path(selected).expanduser().resolve()
+
+
+def configure_input_and_outputs(
+    export_file: str | Path | None = None,
+    output_directory: str | Path | None = None,
+) -> Path:
+    """
+    Configure the global paths used by the existing Tier 1 functions.
+
+    By default, output files are written beside the selected ELECTRO export.
+    The main application can optionally provide an active-design folder.
+    """
+
+    global EXPORT_FILE
+    global OUTPUT_FEATURES_XLSX
+    global OUTPUT_FEATURES_CSV
+
+    EXPORT_FILE = resolve_export_file(export_file)
+
+    if output_directory is None:
+        output_dir = EXPORT_FILE.parent
+    else:
+        output_dir = Path(output_directory).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    OUTPUT_FEATURES_XLSX = output_dir / "tier1_input_vector.xlsx"
+    OUTPUT_FEATURES_CSV = output_dir / "tier1_input_vector.csv"
+
+    return EXPORT_FILE
 
 N_ZONES = 4
 ZONE_EDGES_PERCENT = [0, 35, 55, 85, 100]  # fallback/fixed only
@@ -697,18 +788,69 @@ def plot_zones(df: pd.DataFrame, n_zones: int, title="ELECTRO Export - Zoned Fie
 
 
 def prompt_zone_labels(n_zones: int):
-    print("\nAvailable labels:")
-    for label in VALID_LABELS:
-        print(f"  - {label}")
+    """
+    Prompt the user to assign a physical label to each temporary zone.
+
+    Numeric shortcuts:
+        1 -> bottom_stress
+        2 -> conductor
+        3 -> top_stress
+        4 -> shield
+        5 -> ignore
+
+    The stored labels remain the full semantic strings, so the input vector
+    still contains values such as ``bottom_stress`` and ``conductor`` rather
+    than the numeric shortcuts.
+    """
+    label_choices = {
+        "1": "bottom_stress",
+        "2": "conductor",
+        "3": "top_stress",
+        "4": "shield",
+        "5": "ignore",
+    }
+
+    # Also allow the full text labels for backward compatibility.
+    text_aliases = {
+        "bottom_stress": "bottom_stress",
+        "bottom": "bottom_stress",
+        "conductor": "conductor",
+        "top_stress": "top_stress",
+        "top": "top_stress",
+        "shield": "shield",
+        "ignore": "ignore",
+    }
+
+    print("\nZone label options:")
+    print("  1 = bottom_stress")
+    print("  2 = conductor")
+    print("  3 = top_stress")
+    print("  4 = shield")
+    print("  5 = ignore")
 
     zone_labels = {}
+
     for zone in range(1, n_zones + 1):
         while True:
-            user_label = input(f"\nEnter label for Zone {zone}: ").strip().lower()
-            if user_label in VALID_LABELS:
-                zone_labels[zone] = user_label
-                break
-            print("Invalid label. Please choose from the available labels.")
+            user_entry = input(
+                f"\nEnter label number for Zone {zone} "
+                "(1=bottom, 2=conductor, 3=top, 4=shield, 5=ignore): "
+            ).strip().lower()
+
+            if user_entry in label_choices:
+                resolved_label = label_choices[user_entry]
+            elif user_entry in text_aliases:
+                resolved_label = text_aliases[user_entry]
+            else:
+                print(
+                    "Invalid label. Enter 1, 2, 3, 4, or 5 "
+                    "(or type the full label name)."
+                )
+                continue
+
+            zone_labels[zone] = resolved_label
+            print(f"  Zone {zone} assigned: {resolved_label}")
+            break
 
     return zone_labels
 
@@ -964,39 +1106,77 @@ def append_features_to_outputs(features: dict, csv_path: Path, xlsx_path: Path):
 # MAIN
 # =========================
 
-def main():
-    print(f"Reading export file:\n{EXPORT_FILE}")
+def main(export_file=None, output_dir=None):
+    """
+    Run Tier 1 extraction.
 
-    df = read_electro_export(EXPORT_FILE)
+    When called by automation_application.py, ``export_file`` and ``output_dir``
+    are passed directly, so no additional file-selection dialog is opened.
+
+    When run standalone, ``resolve_export_file`` retains the file-picker
+    fallback. ``ELECTRO_EXPORT_FILE`` is also supported for compatibility.
+    """
+    selected_export = configure_input_and_outputs(
+        export_file=export_file,
+        output_directory=output_dir,
+    )
+
+    output_directory = OUTPUT_FEATURES_CSV.parent
+
+    print(f"Reading export file:\n{selected_export}")
+    print(f"Tier 1 outputs will be saved to:\n{output_directory}")
+
+    df = read_electro_export(selected_export)
     df = standardize_columns(df)
     df = add_normalized_distance(df)
 
-    df_dp, df_derivative, df_hybrid = create_zoned_versions(df, N_ZONES)
+    df_dp, df_derivative, df_hybrid = create_zoned_versions(
+        df,
+        N_ZONES
+    )
 
-    plot_zones(df_dp, N_ZONES, title="ELECTRO Export - DP Zones - All Measurements")
-    plot_zones(df_derivative, N_ZONES, title="ELECTRO Export - Derivative Zones - All Measurements")
-    plot_zones(df_hybrid, N_ZONES, title="ELECTRO Export - Hybrid Zones - All Measurements")
+    plot_zones(
+        df_dp,
+        N_ZONES,
+        title="ELECTRO Export - DP Zones - All Measurements"
+    )
+
+    plot_zones(
+        df_derivative,
+        N_ZONES,
+        title="ELECTRO Export - Derivative Zones - All Measurements"
+    )
+
+    plot_zones(
+        df_hybrid,
+        N_ZONES,
+        title="ELECTRO Export - Hybrid Zones - All Measurements"
+    )
 
     while True:
         choice = input(
-            "\nWhich zoning method do you want to use for Tier 1 data extraction? "
-            "Enter 'dp', 'derivative', or 'hybrid': "
+            "\nWhich zoning method do you want to use for Tier 1 "
+            "data extraction? Enter 'dp', 'derivative', or 'hybrid': "
         ).strip().lower()
 
-        if choice in ["dp", "adaptive"]:
+        if choice in {"dp", "adaptive"}:
             selected_df = df_dp
             selected_method = "dp"
             break
-        elif choice in ["derivative", "deriv"]:
+
+        if choice in {"derivative", "deriv"}:
             selected_df = df_derivative
             selected_method = "derivative"
             break
-        elif choice in ["hybrid", "h"]:
+
+        if choice in {"hybrid", "h"}:
             selected_df = df_hybrid
             selected_method = "hybrid"
             break
 
-        print("Invalid choice. Enter 'dp', 'derivative', or 'hybrid'.")
+        print(
+            "Invalid choice. Enter 'dp', 'derivative', or 'hybrid'."
+        )
 
     print(f"\nSelected zoning method: {selected_method}")
 
@@ -1007,6 +1187,7 @@ def main():
         print(f"  Zone {zone}: {label}")
 
     pass_fail_label, pass_fail_code = prompt_pass_fail_label()
+
     print(f"\nSelected outcome label: {pass_fail_label}")
 
     features = extract_tier1_input_vector(
@@ -1018,15 +1199,48 @@ def main():
     )
 
     print("\nRunning zoned Wavelet and FFT feature extraction...")
-    dsp_features = extract_zoned_dsp_input_features(selected_df, zone_labels)
+
+    dsp_features = extract_zoned_dsp_input_features(
+        selected_df,
+        zone_labels
+    )
+
     features.update(dsp_features)
 
-    append_features_to_outputs(features, OUTPUT_FEATURES_CSV, OUTPUT_FEATURES_XLSX)
+    append_features_to_outputs(
+        features,
+        OUTPUT_FEATURES_CSV,
+        OUTPUT_FEATURES_XLSX
+    )
 
     print("\nDone.")
-    print("Tier 1 output now includes zoned E-field features plus zoned Wavelet/FFT DSP features.")
-    print("Geometry features are still excluded and can be merged later.")
+    print(
+        "Tier 1 output now includes zoned E-field features plus "
+        "zoned Wavelet/FFT DSP features."
+    )
+    print(
+        "Geometry features are still excluded here and should be "
+        "merged by the main application."
+    )
+
+    return features
 
 
 if __name__ == "__main__":
-    main()
+    root = Tk()
+    root.withdraw()
+
+    selected_file = filedialog.askopenfilename(
+        title="Select ELECTRO export file",
+        filetypes=[
+            ("CSV and TXT files", "*.csv *.txt"),
+            ("All files", "*.*"),
+        ],
+    )
+
+    root.destroy()
+
+    if not selected_file:
+        raise SystemExit("No file selected.")
+
+    main(export_file=selected_file)
