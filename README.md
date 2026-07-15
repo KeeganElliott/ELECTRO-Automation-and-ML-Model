@@ -1,236 +1,119 @@
-\# ELECTRO Automation \& Assistive/Predictive Machine Learning Platform
+# ELECTRO Automation & Assistive/Predictive Machine Learning Platform
 
-
-
-An integrated automation platform for high-voltage bushing design, simulation, digital signal processing (DSP), feature extraction, and assistive/predictive machine learning using Integrated Engineering Software's \*\*ELECTRO\*\*.
-
-
+An integrated automation platform for high-voltage bushing design, simulation, digital signal processing (DSP), feature extraction, and assistive/predictive machine learning using Integrated Engineering Software's **ELECTRO**.
 
 The project automates much of the engineering workflow required to analyze high-voltage bushings, collect geometric and simulation data, generate machine-learning-ready datasets, and develop predictive models capable of evaluating future bushing designs.
 
+---
 
-
-\---
-
-
-
-\## Overview
-
-
+## Overview
 
 This repository combines:
 
-
-
-\- ELECTRO simulation automation
-
-\- Geometry extraction
-
-\- DSP-based feature extraction
-
-\- Dataset generation
-
-\- Machine learning
-
-\- Design recommendation support
-
-
+- ELECTRO simulation automation
+- Geometry extraction
+- DSP-based feature extraction
+- Dataset generation
+- Machine learning
+- Design recommendation support
 
 The objective is to reduce manual engineering effort while producing standardized datasets that can be used to train predictive models capable of estimating simulation outcomes and assisting future bushing design optimization.
 
+---
 
+# Major Capabilities
 
-\---
+## Geometry Automation
 
+- Automatic extraction of bushing geometry
+- Conductor dimensions
+- Shield dimensions
+- Shell dimensions
+- SolidWorks feature extraction
+- Segment-based ELECTRO geometry extraction
 
+---
 
-\# Major Capabilities
-
-
-
-\## Geometry Automation
-
-
-
-\- Automatic extraction of bushing geometry
-
-\- Conductor dimensions
-
-\- Shield dimensions
-
-\- Shell dimensions
-
-\- SolidWorks feature extraction
-
-\- Segment-based ELECTRO geometry extraction
-
-
-
-\---
-
-
-
-\## ELECTRO Automation
-
-
+## ELECTRO Automation
 
 Automates many repetitive simulation tasks including
 
+- Material assignment
+- Boundary condition setup
+- Voltage assignment
+- Static analysis execution
+- Transient analysis setup
+- Result extraction
+- Simulation metadata collection
 
+---
 
-\- Material assignment
-
-\- Boundary condition setup
-
-\- Voltage assignment
-
-\- Static analysis execution
-
-\- Transient analysis setup
-
-\- Result extraction
-
-\- Simulation metadata collection
-
-
-
-\---
-
-
-
-\## PDF Information Extraction
-
-
+## PDF Information Extraction
 
 Automatic extraction of engineering specifications from drawing packages.
 
-
-
 Examples include
 
+- Creepage distance
+- Rated voltage
+- Basic Impulse Level (BIL)
 
+---
 
-\- Creepage distance
-
-\- Rated voltage
-
-\- Basic Impulse Level (BIL)
-
-
-
-\---
-
-
-
-\## Digital Signal Processing
-
-
+## Digital Signal Processing
 
 Extracts quantitative descriptors from simulated electric-field distributions.
 
-
-
 Current techniques include
 
+- FFT analysis
+- Wavelet analysis
+- Peak detection
+- Spectral energy measurements
+- Frequency-domain descriptors
+- Spatial-domain statistics
 
+---
 
-\- FFT analysis
-
-\- Wavelet analysis
-
-\- Peak detection
-
-\- Spectral energy measurements
-
-\- Frequency-domain descriptors
-
-\- Spatial-domain statistics
-
-
-
-\---
-
-
-
-\## Dataset Generation
-
-
+## Dataset Generation
 
 Automatically produces machine-learning-ready datasets.
 
-
-
 Collected features include
 
+- Geometry
+- Material properties
+- Voltage information
+- Creepage distance
+- Electric field statistics
+- DSP features
+- Simulation metadata
+- Pass / Fail labels
 
+---
 
-\- Geometry
-
-\- Material properties
-
-\- Voltage information
-
-\- Creepage distance
-
-\- Electric field statistics
-
-\- DSP features
-
-\- Simulation metadata
-
-\- Pass / Fail labels
-
-
-
-\---
-
-
-
-\## Machine Learning
-
-
+## Machine Learning
 
 The repository includes the framework for an assistive and predictive machine-learning system.
 
-
-
 Current architecture
 
-
-
-\- Elastic-Net Logistic Regression
-
-\- Constrained Gradient Boosted Trees
-
-\- Constrained Deep Forest
-
-\- Regression surrogate models
-
-\- Counterfactual recommendation engine
-
-
+- Elastic-Net Logistic Regression
+- Constrained Gradient Boosted Trees
+- Constrained Deep Forest
+- Regression surrogate models
+- Counterfactual recommendation engine
 
 Future work includes
 
+- Bayesian optimization
+- Genetic optimization
+- Active learning
+- Automated design recommendation
 
+---
 
-\- Bayesian optimization
-
-\- Genetic optimization
-
-\- Active learning
-
-\- Automated design recommendation
-
-
-
-\---
-
-
-
-\# Repository Structure
-
-
+# Repository Structure
 
 ```
 
@@ -264,19 +147,11 @@ Application/
 
 ```
 
+---
 
-
-\---
-
-
-
-\# Installation
-
-
+# Installation
 
 Clone the repository
-
-
 
 ```bash
 
@@ -284,11 +159,7 @@ git clone https://github.com/KeeganElliott/ELECTRO-Automation-and-ML-Model.git
 
 ```
 
-
-
 Create a virtual environment
-
-
 
 ```bash
 
@@ -296,15 +167,9 @@ python -m venv .venv
 
 ```
 
-
-
 Activate
 
-
-
 Windows
-
-
 
 ```bash
 
@@ -312,11 +177,7 @@ Windows
 
 ```
 
-
-
 Install requirements
-
-
 
 ```bash
 
@@ -324,19 +185,11 @@ pip install -r requirements.txt
 
 ```
 
+---
 
-
-\---
-
-
-
-\# Workflow
-
-
+# Workflow
 
 Typical workflow
-
-
 
 ```
 
@@ -398,133 +251,51 @@ Predictive Design Assistance
 
 ```
 
+---
 
-
-\---
-
-
-
-\# Project Goals
-
-
+# Project Goals
 
 The long-term goal is to build an engineering assistant capable of
 
+- Predicting simulation outcomes
+- Explaining predicted failures
+- Recommending design improvements
+- Reducing the number of expensive simulations required during high-voltage bushing development
 
+---
 
-\- Predicting simulation outcomes
+# Technologies
 
-\- Explaining predicted failures
+- Python
+- Integrated Engineering Software ELECTRO
+- SolidWorks
+- NumPy
+- SciPy
+- Pandas
+- Matplotlib
+- PyWavelets
+- OpenPyXL
+- OpenCV
+- Scikit-Learn
 
-\- Recommending design improvements
+---
 
-\- Reducing the number of expensive simulations required during high-voltage bushing development
-
-
-
-\---
-
-
-
-\# Technologies
-
-
-
-\- Python
-
-\- Integrated Engineering Software ELECTRO
-
-\- SolidWorks
-
-\- NumPy
-
-\- SciPy
-
-\- Pandas
-
-\- Matplotlib
-
-\- PyWavelets
-
-\- OpenPyXL
-
-\- OpenCV
-
-\- Scikit-Learn
-
-
-
-\---
-
-
-
-\# Current Development Status
-
-
+# Current Development Status
 
 Current focus
 
-
-
-\- Data collection
-
-\- Feature engineering
-
-\- Model training
-
-\- Validation
-
-\- Assistive recommendation system
-
-
+- Data collection
+- Feature engineering
+- Model training
+- Validation
+- Assistive recommendation system
 
 Future work
 
+- Physics-informed machine learning
+- Automated design optimization
+- Larger training datasets
+- Improved recommendation engine
+- Deep-learning experimentation
 
-
-\- Physics-informed machine learning
-
-\- Automated design optimization
-
-\- Larger training datasets
-
-\- Improved recommendation engine
-
-\- Deep-learning experimentation
-
-
-
-\---
-
-
-
-\# Author
-
-
-
-Keegan Elliott
-
-
-
-Electrical Engineering
-
-
-
-Southern Illinois University Edwardsville
-
-
-
-Research interests
-
-
-
-\- High-voltage insulation systems
-
-\- Digital Signal Processing
-
-\- Machine Learning
-
-\- Computational Engineering
-
-\- Engineering Automation
-
+---
