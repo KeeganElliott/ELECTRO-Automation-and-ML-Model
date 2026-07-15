@@ -350,30 +350,36 @@ def main():
         alignment_tolerance=alignment_tolerance,
     )
 
+    # Canonical output names match the centralized compact-vector schema.
+    # Every ELECTRO coordinate-derived distance is expressed in millimetres.
     features = {
-        "conductor_diameter": conductor_diameter,
-        "conductor_length": conductor_length,
-        "shield_diameter": shield_diameter,
-        "shield_length": shield_length,
-        "shell_diameter": shell_diameter,
-        "shield_y_max": shield["y_max"],
-        "shield_y_min": shield["y_min"],
-        "upper_shell_y_max": upper_shell["y_max"],
-        "lower_shell_y_min": lower_shell["y_min"],
-        "shell_outer_x_max": shell_outer_x,
-        "shield_shed_alignment_tolerance": alignment_tolerance,
-        "upper_shield_to_shed_global_delta_x": upper_relationship["global_delta_x"],
-        "upper_shield_to_shed_global_delta_y": upper_relationship["global_delta_y"],
-        "upper_shield_to_shed_outward_delta_x": upper_relationship["outward_delta_x"],
-        "upper_shield_to_shed_outward_delta_y": upper_relationship["outward_delta_y"],
-        "upper_shield_to_shed_distance": upper_relationship["distance"],
-        "upper_shield_to_shed_relation_code": upper_relationship["relation_code"],
-        "lower_shield_to_shed_global_delta_x": lower_relationship["global_delta_x"],
-        "lower_shield_to_shed_global_delta_y": lower_relationship["global_delta_y"],
-        "lower_shield_to_shed_outward_delta_x": lower_relationship["outward_delta_x"],
-        "lower_shield_to_shed_outward_delta_y": lower_relationship["outward_delta_y"],
-        "lower_shield_to_shed_distance": lower_relationship["distance"],
-        "lower_shield_to_shed_relation_code": lower_relationship["relation_code"],
+        "conductor_diameter_mm": conductor_diameter,
+        "conductor_length_mm": conductor_length,
+        "shield_diameter_mm": shield_diameter,
+        "shield_length_mm": shield_length,
+        "shell_mean_diameter_mm": shell_diameter,
+        "shield_y_max_mm": shield["y_max"],
+        "shield_y_min_mm": shield["y_min"],
+        "top_shed_y_max_mm": upper_shell["y_max"],
+        "bottom_shed_y_min_mm": lower_shell["y_min"],
+        "shell_outer_x_max_mm": shell_outer_x,
+        "shield_shed_alignment_tolerance_mm": alignment_tolerance,
+
+        # Top/upper shield bulb to selected nearest-shed reference.
+        "top_shed_global_delta_x_mm": upper_relationship["global_delta_x"],
+        "top_shed_global_delta_y_mm": upper_relationship["global_delta_y"],
+        "top_shed_outward_delta_x_mm": upper_relationship["outward_delta_x"],
+        "top_shed_outward_delta_y_mm": upper_relationship["outward_delta_y"],
+        "top_bulb_distance_to_nearest_shed_mm": upper_relationship["distance"],
+        "top_shield_to_shed_relation_code": upper_relationship["relation_code"],
+
+        # Bottom/lower shield bulb to selected nearest-shed reference.
+        "bottom_shed_global_delta_x_mm": lower_relationship["global_delta_x"],
+        "bottom_shed_global_delta_y_mm": lower_relationship["global_delta_y"],
+        "bottom_shed_outward_delta_x_mm": lower_relationship["outward_delta_x"],
+        "bottom_shed_outward_delta_y_mm": lower_relationship["outward_delta_y"],
+        "bottom_bulb_distance_to_nearest_shed_mm": lower_relationship["distance"],
+        "bottom_shield_to_shed_relation_code": lower_relationship["relation_code"],
     }
 
     references = {
@@ -410,8 +416,8 @@ def main():
 
         writer.writerow([])
         writer.writerow([
-            "reference", "segment_id", "type", "midpoint_x", "midpoint_y",
-            "x_span", "y_span", "x_min", "x_max", "y_min", "y_max",
+            "reference", "segment_id", "type", "midpoint_x_mm", "midpoint_y_mm",
+            "x_span_mm", "y_span_mm", "x_min_mm", "x_max_mm", "y_min_mm", "y_max_mm",
         ])
         for key, data in references.items():
             writer.writerow([
@@ -422,9 +428,9 @@ def main():
 
         writer.writerow([])
         writer.writerow([
-            "relationship", "shield_x", "shield_y", "shell_x", "shell_y",
-            "global_delta_x", "global_delta_y", "outward_delta_x",
-            "outward_delta_y", "distance", "alignment_tolerance",
+            "relationship", "shield_x_mm", "shield_y_mm", "shell_x_mm", "shell_y_mm",
+            "global_delta_x_mm", "global_delta_y_mm", "outward_delta_x_mm",
+            "outward_delta_y_mm", "distance_mm", "alignment_tolerance_mm",
             "relation_code", "relation_label",
         ])
 
@@ -445,6 +451,7 @@ def main():
             ])
 
     print(f"\nSaved: {output_path.resolve()}")
+    return features
 
 
 if __name__ == "__main__":

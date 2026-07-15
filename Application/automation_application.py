@@ -7,8 +7,9 @@ Data architecture
 -----------------
 1. design_profiles.csv          one authoritative row per design/variant
 2. simulation_records.csv       one authoritative row per simulation
-3. electro_master_input_vector  merged audit/research table
-4. electro_model_ready_vector   numeric/categorical-encoded learning table
+3. electro_master_input_vector          merged audit/research table
+4. electro_expanded_model_ready_vector  former full research learning table
+5. electro_model_ready_input_vector     fixed 80-feature initial ML table
 
 Generated/imported artifacts are organized as:
     ELECTRO_Data_Collected/<active_design_id>/
@@ -31,9 +32,10 @@ from pathlib import Path
 from typing import Any
 
 try:
+    import numpy as np
     import pandas as pd
 except ImportError as exc:
-    raise SystemExit("Install pandas and openpyxl: py -m pip install pandas openpyxl") from exc
+    raise SystemExit("Install numpy, pandas, and openpyxl: py -m pip install numpy pandas openpyxl") from exc
 
 try:
     import tkinter as tk
@@ -110,13 +112,15 @@ SIMULATION_DB_CSV = DATA_DIR / "simulation_records.csv"
 STATE_JSON = DATA_DIR / "application_state.json"
 MASTER_CSV = DATA_DIR / "electro_master_input_vector.csv"
 MASTER_XLSX = DATA_DIR / "electro_master_input_vector.xlsx"
+EXPANDED_MODEL_READY_CSV = DATA_DIR / "electro_expanded_model_ready_input_vector.csv"
+EXPANDED_MODEL_READY_XLSX = DATA_DIR / "electro_expanded_model_ready_input_vector.xlsx"
 MODEL_READY_CSV = DATA_DIR / "electro_model_ready_input_vector.csv"
 MODEL_READY_XLSX = DATA_DIR / "electro_model_ready_input_vector.xlsx"
 
 SCRIPT_CANDIDATES = {
     "solidworks": ["solidworks_geometry.py"],
     "electro_geometry": ["electro_geometry.py"],
-    "creepage": ["creepage.py"],
+    "creepage": ["creepage.py", "pdf.py"],
     "tier1": ["tier1.py"],
     "simulation": ["electro_automation.py"],
 }
@@ -137,8 +141,9 @@ MODEL_EXCLUDE_EXACT = {
 }
 MODEL_EXCLUDE_SUBSTRINGS = ("_path", "_file", "_output", "_error", "context", "keyword")
 
-# Moderate first-wave feature reduction for the model-ready vector only.
-# The audit master and Tier 1 outputs retain every extracted feature.
+# Legacy moderate reduction for the renamed expanded model-ready vector only.
+# The compact vector below uses its own fixed 80-feature schema, while the audit
+# master and Tier 1 outputs retain every extracted feature.
 MODEL_EXCLUDE_EXACT.update({
     # Export/sampling metadata rather than bushing physics.
     "num_total_points",
@@ -195,7 +200,6 @@ MODEL_EXCLUDE_REGEX = [
 
 MODEL_CATEGORICAL_COLUMNS = {
     "simulation_type", "voltage_polarity", "transient_waveform_name",
-    "conductor_material", "shield_material", "shell_material",
     "dominant_E_max_zone_label", "dominant_E_auc_zone_label",
 }
 
@@ -206,6 +210,178 @@ MODEL_METADATA_COLUMNS = [
     "simulation_id",
     "pass_fail_label",
 ]
+
+# Fixed first-stage model schema. These are the 75 actual predictor dimensions;
+# grouping/record metadata, the human label, and pass_fail_code are additional
+# non-predictor columns. The expanded vector remains available for later feature
+# studies after substantially more simulations have been collected.
+COMPACT_MODEL_FEATURES = [
+    # Operating condition and design ratings (5)
+    "simulation_voltage_kv",
+    "voltage_rating_kv",
+    "bil_voltage_kv",
+    "simulation_type_static",
+    "voltage_polarity_negative",
+
+    # Geometry (18 numeric/binary). Material selections are invariant across
+    # designs and therefore excluded: constants cannot improve predictions.
+    "shield_present",
+    "conductor_diameter_mm",
+    "conductor_length_mm",
+    "shield_diameter_mm",
+    "shield_length_mm",
+    "shell_mean_diameter_mm",
+    "top_creepage_distance_mm",
+    "bottom_creepage_distance_mm",
+    "total_creepage_distance_mm",
+    "top_bulb_distance_to_nearest_shed_mm",
+    "bottom_bulb_distance_to_nearest_shed_mm",
+    "top_shed_outward_delta_y_mm",
+    "bottom_shed_outward_delta_y_mm",
+    "top_shed_outward_delta_x_mm",
+    "bottom_shed_outward_delta_x_mm",
+    "conductor_to_shield_radial_clearance_mm",
+    "shield_to_shell_radial_clearance_mm",
+    "shield_length_over_conductor_length",
+
+    # Compact E-stress set (25), emphasizing top/bottom flashover zones
+    "global_E_max",
+    "global_E_mean",
+    "global_E_p95",
+    "global_E_auc",
+    "global_E_peak_d_percent",
+    "E_curve1_max",
+    "E_curve1_p95",
+    "E_curve2_max",
+    "E_curve2_p95",
+    "conductor_E_max",
+    "conductor_E_p95",
+    "conductor_E_max_over_global_E_max",
+    "shield_E_max",
+    "shield_E_p95",
+    "shield_E_max_over_global_E_max",
+    "top_stress_E_max",
+    "top_stress_E_mean",
+    "top_stress_E_p95",
+    "top_stress_E_auc",
+    "top_stress_E_max_over_global_E_max",
+    "bottom_stress_E_max",
+    "bottom_stress_E_mean",
+    "bottom_stress_E_p95",
+    "bottom_stress_E_auc",
+    "bottom_stress_E_max_over_global_E_max",
+
+    # DSP/spatial-shape set (12), including top/bottom localization
+    "conductor_E_wavelet_high_freq_energy_ratio",
+    "conductor_E_wavelet_peak_power_spatial_freq_cyc_per_mm",
+    "shield_E_wavelet_high_freq_energy_ratio",
+    "shield_E_wavelet_peak_power_spatial_freq_cyc_per_mm",
+    "conductor_E_fft_max_abs_dE_dd",
+    "conductor_E_fft_dominant_spatial_freq_cyc_per_mm",
+    "shield_E_fft_max_abs_dE_dd",
+    "shield_E_fft_dominant_spatial_freq_cyc_per_mm",
+    "top_stress_E_wavelet_high_freq_energy_ratio",
+    "top_stress_E_fft_max_abs_dE_dd",
+    "bottom_stress_E_wavelet_high_freq_energy_ratio",
+    "bottom_stress_E_fft_max_abs_dE_dd",
+
+    # Surface-bound Q-stress set (15), emphasizing top/bottom flashover zones
+    "global_surface_bound_Q_max",
+    "global_surface_bound_Q_min",
+    "global_surface_bound_Q_abs_max",
+    "global_surface_bound_Q_p95_abs",
+    "global_surface_bound_Q_auc_abs",
+    "conductor_surface_bound_Q_abs_max",
+    "shield_surface_bound_Q_abs_max",
+    "top_stress_surface_bound_Q_abs_max",
+    "top_stress_surface_bound_Q_p95_abs",
+    "top_stress_surface_bound_Q_auc_abs",
+    "top_stress_surface_bound_Q_abs_max_over_global_surface_bound_Q_abs_max",
+    "bottom_stress_surface_bound_Q_abs_max",
+    "bottom_stress_surface_bound_Q_p95_abs",
+    "bottom_stress_surface_bound_Q_auc_abs",
+    "bottom_stress_surface_bound_Q_abs_max_over_global_surface_bound_Q_abs_max",
+]
+
+assert len(COMPACT_MODEL_FEATURES) == 75, "Compact model schema must remain exactly 75 features."
+
+# Current and legacy collection scripts have used several equivalent names.
+# The compact vector exposes only the canonical name on the left. Matching is
+# case-insensitive, so historical E/Q capitalization remains usable.
+COMPACT_FEATURE_ALIASES = {
+    "voltage_rating_kv": [
+        "rated_voltage_kv", "regular_voltage_rating_kv", "nominal_voltage_kv",
+    ],
+    "bil_voltage_kv": [
+        "rated_bil_voltage_kv", "basic_impulse_level_kv", "bil_rating_kv",
+    ],
+    "shell_mean_diameter_mm": [
+        "outer_shell_mean_diameter_mm", "shell_diameter_mm", "shell_diameter_electro_units",
+    ],
+    "conductor_diameter_mm": ["conductor_diameter_electro_units"],
+    "conductor_length_mm": ["conductor_length_electro_units"],
+    "shield_diameter_mm": ["shield_diameter_electro_units"],
+    "shield_length_mm": ["shield_length_electro_units"],
+    "top_bulb_distance_to_nearest_shed_mm": [
+        "top_bulb_to_nearest_shed_mm", "top_bulb_shed_distance_mm",
+        "upper_shield_to_shed_distance", "upper_shield_to_shed_distance_mm",
+    ],
+    "bottom_bulb_distance_to_nearest_shed_mm": [
+        "bottom_bulb_to_nearest_shed_mm", "bottom_bulb_shed_distance_mm",
+        "lower_shield_to_shed_distance", "lower_shield_to_shed_distance_mm",
+    ],
+    "top_shed_outward_delta_y_mm": [
+        "top_outward_delta_y_mm", "upper_shed_outward_delta_y_mm",
+        "upper_shield_to_shed_outward_delta_y",
+        "upper_shield_to_shed_outward_delta_y_mm",
+    ],
+    "bottom_shed_outward_delta_y_mm": [
+        "bottom_outward_delta_y_mm", "lower_shed_outward_delta_y_mm",
+        "lower_shield_to_shed_outward_delta_y",
+        "lower_shield_to_shed_outward_delta_y_mm",
+    ],
+    "top_shed_outward_delta_x_mm": [
+        "top_outward_delta_x_mm", "upper_shed_outward_delta_x_mm",
+        "upper_shield_to_shed_outward_delta_x",
+        "upper_shield_to_shed_outward_delta_x_mm",
+    ],
+    "bottom_shed_outward_delta_x_mm": [
+        "bottom_outward_delta_x_mm", "lower_shed_outward_delta_x_mm",
+        "lower_shield_to_shed_outward_delta_x",
+        "lower_shield_to_shed_outward_delta_x_mm",
+    ],
+    "global_surface_bound_Q_max": ["global_Q_max", "global_surface_bound_q_max"],
+    "global_surface_bound_Q_min": ["global_Q_min", "global_surface_bound_q_min"],
+    "global_surface_bound_Q_abs_max": [
+        "global_Q_abs_max", "global_Q_max_abs", "global_surface_bound_q_abs_max",
+    ],
+    "global_surface_bound_Q_p95_abs": [
+        "global_Q_p95_abs", "global_Q_abs_p95", "global_surface_bound_q_p95_abs",
+    ],
+    "global_surface_bound_Q_auc_abs": [
+        "global_Q_auc_abs", "global_Q_abs_auc", "global_surface_bound_q_auc_abs",
+    ],
+    "conductor_surface_bound_Q_abs_max": [
+        "conductor_Q_abs_max", "conductor_Q_max_abs", "conductor_surface_bound_q_abs_max",
+    ],
+    "shield_surface_bound_Q_abs_max": [
+        "shield_Q_abs_max", "shield_Q_max_abs", "shield_surface_bound_q_abs_max",
+    ],
+    "top_stress_surface_bound_Q_abs_max": [
+        "top_stress_Q_abs_max", "top_stress_Q_max_abs", "top_stress_surface_bound_q_abs_max",
+    ],
+    "bottom_stress_surface_bound_Q_abs_max": [
+        "bottom_stress_Q_abs_max", "bottom_stress_Q_max_abs", "bottom_stress_surface_bound_q_abs_max",
+    ],
+}
+
+COMPACT_CATEGORICAL_FEATURES: set[str] = set()
+
+COMPACT_DERIVED_FEATURES = {
+    "simulation_type_static", "voltage_polarity_negative", "shield_present",
+    "total_creepage_distance_mm", "conductor_to_shield_radial_clearance_mm",
+    "shield_to_shell_radial_clearance_mm", "shield_length_over_conductor_length",
+}
 
 
 def now_iso() -> str:
@@ -587,7 +763,7 @@ def _semantic_feature_name(column: str, zone_id: int, region: str) -> str | None
     patterns = (
         # Aggregate zone features.
         re.compile(
-            rf"^zone{zone_id}_{escaped_region}_(E_.+)$",
+            rf"^zone{zone_id}_{escaped_region}_((?:E|Q)_.+|surface_bound_Q_.+)$",
             re.IGNORECASE,
         ),
         # Per-curve zone features.
@@ -758,9 +934,9 @@ def semanticize_zone_features(master: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(semantic_rows)
 
 
-def build_model_ready(master: pd.DataFrame) -> pd.DataFrame:
+def build_expanded_model_ready(master: pd.DataFrame) -> pd.DataFrame:
     """
-    Create a moderate-complexity learning matrix using physical-region names.
+    Create the former broad learning matrix using physical-region names.
 
     The audit master remains unchanged and retains temporary zone numbers.
     The model-ready table translates zone-number-dependent features into stable
@@ -855,7 +1031,241 @@ def build_model_ready(master: pd.DataFrame) -> pd.DataFrame:
     return learning.reindex(columns=ordered_columns)
 
 
-def rebuild_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
+def _canonical_lookup(columns: list[str]) -> dict[str, str]:
+    """Case-insensitive column lookup without changing research/audit names."""
+    return {str(column).strip().lower(): column for column in columns}
+
+
+def _coalesced_series(
+    frame: pd.DataFrame,
+    canonical_name: str,
+    aliases: list[str] | None = None,
+) -> pd.Series:
+    """Return the first nonblank value across a canonical field and aliases."""
+    lookup = _canonical_lookup(list(frame.columns))
+    candidates = [canonical_name, *(aliases or [])]
+    present = [lookup[name.lower()] for name in candidates if name.lower() in lookup]
+    if not present:
+        return pd.Series(pd.NA, index=frame.index, dtype="object")
+
+    result = frame[present[0]].copy()
+    for column in present[1:]:
+        result = result.combine_first(frame[column])
+    return result
+
+
+def _numeric_series(frame: pd.DataFrame, name: str) -> pd.Series:
+    return pd.to_numeric(
+        _coalesced_series(frame, name, COMPACT_FEATURE_ALIASES.get(name)),
+        errors="coerce",
+    )
+
+
+def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    denominator = pd.to_numeric(denominator, errors="coerce")
+    numerator = pd.to_numeric(numerator, errors="coerce")
+    return numerator.div(denominator.where(denominator.abs() > 1e-12))
+
+
+def standardize_master_measurements(master: pd.DataFrame) -> pd.DataFrame:
+    """
+    Coalesce historical geometry/rating names into the canonical mm/kV names.
+
+    Source databases remain auditable, while every generated input vector uses
+    explicit millimetre column names. No inch representation is introduced.
+    """
+    if master.empty:
+        return master.copy()
+
+    output = master.copy()
+    canonical_fields = {
+        "conductor_diameter_mm", "conductor_length_mm", "shield_diameter_mm",
+        "shield_length_mm", "shell_mean_diameter_mm", "bushing_inside_diameter_mm",
+        "top_bulb_distance_to_nearest_shed_mm", "bottom_bulb_distance_to_nearest_shed_mm",
+        "top_shed_outward_delta_y_mm", "bottom_shed_outward_delta_y_mm",
+        "top_shed_outward_delta_x_mm", "bottom_shed_outward_delta_x_mm",
+        "voltage_rating_kv", "bil_voltage_kv",
+    }
+    for name in canonical_fields:
+        output[name] = _coalesced_series(
+            output,
+            name,
+            COMPACT_FEATURE_ALIASES.get(name),
+        )
+
+    # Remove only known duplicate measurement representations from generated
+    # vectors. Original source CSVs and archived extractor outputs are untouched.
+    duplicate_aliases = {
+        alias
+        for name in canonical_fields
+        for alias in COMPACT_FEATURE_ALIASES.get(name, [])
+        if alias != name
+    }
+    duplicate_aliases.update({
+        "top_creepage_distance_in", "bottom_creepage_distance_in",
+    })
+    output = output.drop(columns=[c for c in duplicate_aliases if c in output], errors="ignore")
+    return output
+
+
+def build_compact_model_ready(master: pd.DataFrame) -> pd.DataFrame:
+    """Build the fixed 75-feature initial ML vector plus metadata and target."""
+    if master.empty:
+        columns = MODEL_METADATA_COLUMNS + COMPACT_MODEL_FEATURES + ["pass_fail_code"]
+        return pd.DataFrame(columns=columns)
+
+    semantic = semanticize_zone_features(standardize_master_measurements(master))
+    compact = pd.DataFrame(index=semantic.index)
+
+    # Non-predictive grouping/traceability fields are retained for safe training.
+    for column in MODEL_METADATA_COLUMNS:
+        compact[column] = _coalesced_series(semantic, column)
+
+    # Copy canonical/raw features first. Derived fields are replaced below.
+    for feature in COMPACT_MODEL_FEATURES:
+        compact[feature] = _coalesced_series(
+            semantic,
+            feature,
+            COMPACT_FEATURE_ALIASES.get(feature),
+        )
+
+    sim_type = _coalesced_series(semantic, "simulation_type").astype("string").str.lower()
+    existing_static = pd.to_numeric(compact["simulation_type_static"], errors="coerce")
+    derived_static = sim_type.str.startswith("stat", na=False).astype(int)
+    compact["simulation_type_static"] = derived_static.where(sim_type.notna(), existing_static)
+
+    polarity = _coalesced_series(semantic, "voltage_polarity").astype("string").str.lower()
+    existing_negative = pd.to_numeric(
+        _coalesced_series(
+            semantic,
+            "voltage_polarity_negative",
+            ["voltage_polarity_-"],
+        ),
+        errors="coerce",
+    )
+    derived_negative = polarity.isin({
+        "-", "negative", "neg", "-1", "minus",
+    }).astype(int)
+    compact["voltage_polarity_negative"] = derived_negative.where(
+        polarity.notna(),
+        existing_negative,
+    )
+
+    conductor_diameter = _numeric_series(semantic, "conductor_diameter_mm")
+    shield_diameter = _numeric_series(semantic, "shield_diameter_mm")
+    shield_length = _numeric_series(semantic, "shield_length_mm")
+    conductor_length = _numeric_series(semantic, "conductor_length_mm")
+    shell_diameter = _numeric_series(semantic, "shell_mean_diameter_mm")
+    top_creepage = _numeric_series(semantic, "top_creepage_distance_mm")
+    bottom_creepage = _numeric_series(semantic, "bottom_creepage_distance_mm")
+
+    explicit_shield = _coalesced_series(semantic, "shield_present")
+    explicit_shield_text = explicit_shield.astype("string").str.lower()
+    compact["shield_present"] = np.where(
+        explicit_shield_text.isin({"0", "false", "no", "n"}),
+        0,
+        np.where(
+            explicit_shield_text.isin({"1", "true", "yes", "y"}),
+            1,
+            shield_diameter.notna().astype(int),
+        ),
+    )
+    compact["total_creepage_distance_mm"] = top_creepage.add(bottom_creepage, fill_value=0)
+    compact.loc[top_creepage.isna() & bottom_creepage.isna(), "total_creepage_distance_mm"] = np.nan
+    compact["conductor_to_shield_radial_clearance_mm"] = (shield_diameter - conductor_diameter) / 2.0
+    compact["shield_to_shell_radial_clearance_mm"] = (shell_diameter - shield_diameter) / 2.0
+    compact["shield_length_over_conductor_length"] = _safe_ratio(shield_length, conductor_length)
+
+    # All retained compact features are numeric/binary.
+    for feature in COMPACT_MODEL_FEATURES:
+        if feature not in COMPACT_CATEGORICAL_FEATURES:
+            compact[feature] = pd.to_numeric(compact[feature], errors="coerce")
+        else:
+            compact[feature] = compact[feature].astype("string")
+
+    compact["pass_fail_code"] = pd.to_numeric(
+        _coalesced_series(semantic, "pass_fail_code"),
+        errors="coerce",
+    )
+    ordered = MODEL_METADATA_COLUMNS + COMPACT_MODEL_FEATURES + ["pass_fail_code"]
+    return compact.reindex(columns=ordered)
+
+
+def compact_feature_dictionary() -> pd.DataFrame:
+    """Describe roles so the training pipeline cannot confuse IDs or labels."""
+    mutable_geometry = {
+        "conductor_diameter_mm", "shield_diameter_mm", "shield_length_mm",
+        "shell_mean_diameter_mm", "top_creepage_distance_mm",
+        "bottom_creepage_distance_mm", "top_bulb_distance_to_nearest_shed_mm",
+        "bottom_bulb_distance_to_nearest_shed_mm", "top_shed_outward_delta_y_mm",
+        "bottom_shed_outward_delta_y_mm", "top_shed_outward_delta_x_mm",
+        "bottom_shed_outward_delta_x_mm",
+    }
+    rows = []
+    for column in MODEL_METADATA_COLUMNS + COMPACT_MODEL_FEATURES + ["pass_fail_code"]:
+        if column == "design_id":
+            role, family = "group_key", "metadata"
+        elif column == "simulation_id":
+            role, family = "record_id", "metadata"
+        elif column == "pass_fail_label":
+            role, family = "human_label_excluded", "target_metadata"
+        elif column == "pass_fail_code":
+            role, family = "classification_target", "target"
+        elif column in COMPACT_DERIVED_FEATURES:
+            role, family = "derived_model_feature", "derived"
+        else:
+            role = "model_feature"
+            if "surface_bound_Q" in column:
+                family = "q_stress"
+            elif "wavelet" in column or "fft" in column:
+                family = "dsp"
+            elif "_E_" in column or column.startswith("E_curve") or column.startswith("global_E"):
+                family = "e_stress"
+            elif column.endswith("_kv") or column.startswith("simulation_type") or column.startswith("voltage_polarity"):
+                family = "operating_condition"
+            else:
+                family = "geometry"
+        if family in {"e_stress", "q_stress"}:
+            surrogate_use = "candidate_surrogate_target"
+        elif family == "dsp":
+            surrogate_use = "postsimulation_only_not_surrogate_input"
+        elif column in COMPACT_MODEL_FEATURES:
+            surrogate_use = "surrogate_input"
+        else:
+            surrogate_use = "excluded"
+
+        if column in {"voltage_rating_kv", "bil_voltage_kv", "top_creepage_distance_mm", "bottom_creepage_distance_mm"}:
+            collection_source = "pdf.py drawing extraction"
+        elif column in {
+            "conductor_diameter_mm", "conductor_length_mm", "shield_diameter_mm",
+            "shield_length_mm", "shell_mean_diameter_mm",
+            "top_bulb_distance_to_nearest_shed_mm", "bottom_bulb_distance_to_nearest_shed_mm",
+            "top_shed_outward_delta_y_mm", "bottom_shed_outward_delta_y_mm",
+            "top_shed_outward_delta_x_mm", "bottom_shed_outward_delta_x_mm",
+        }:
+            collection_source = "electro_geometry.py or compatible geometry extractor"
+        elif family in {"e_stress", "q_stress", "dsp"}:
+            collection_source = "tier1.py simulation export analysis"
+        elif role == "derived_model_feature":
+            collection_source = "automation_application.py derived"
+        elif family == "operating_condition":
+            collection_source = "simulation metadata"
+        else:
+            collection_source = "centralized application"
+
+        rows.append({
+            "column_name": column,
+            "role": role,
+            "feature_family": family,
+            "included_in_predictor_X": column in COMPACT_MODEL_FEATURES,
+            "surrogate_use": surrogate_use,
+            "counterfactual_mutable": column in mutable_geometry,
+            "collection_source": collection_source,
+        })
+    return pd.DataFrame(rows)
+
+
+def rebuild_outputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     designs = load_design_db()
     simulations = normalize_pass_fail_dataframe(load_simulation_db())
 
@@ -868,9 +1278,12 @@ def rebuild_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     else:
         design_view = designs.drop(columns=["created_at", "updated_at"], errors="ignore")
         master = simulations.merge(design_view, on="design_id", how="left", validate="many_to_one")
+    master = standardize_master_measurements(master)
     master.to_csv(MASTER_CSV, index=False)
 
-    model_ready = build_model_ready(master)
+    expanded_model_ready = build_expanded_model_ready(master)
+    model_ready = build_compact_model_ready(master)
+    expanded_model_ready.to_csv(EXPANDED_MODEL_READY_CSV, index=False)
     model_ready.to_csv(MODEL_READY_CSV, index=False)
 
     try:
@@ -878,10 +1291,10 @@ def rebuild_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
             master.to_excel(writer, index=False, sheet_name="Master_Input_Vector")
             designs.to_excel(writer, index=False, sheet_name="Design_Profiles")
             simulations.to_excel(writer, index=False, sheet_name="Simulation_Records")
-        with pd.ExcelWriter(MODEL_READY_XLSX, engine="openpyxl") as writer:
-            model_ready.to_excel(writer, index=False, sheet_name="Model_Ready_Vector")
+        with pd.ExcelWriter(EXPANDED_MODEL_READY_XLSX, engine="openpyxl") as writer:
+            expanded_model_ready.to_excel(writer, index=False, sheet_name="Expanded_Model_Ready_Vector")
             pd.DataFrame({
-                "column_name": model_ready.columns,
+                "column_name": expanded_model_ready.columns,
                 "role": [
                     "target"
                     if c == "pass_fail_code"
@@ -889,19 +1302,26 @@ def rebuild_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
                     if c == "design_id"
                     else "record_id"
                     if c == "simulation_id"
-                    else "human_label"
+                    else "human_label_excluded"
                     if c == "pass_fail_label"
-                    else "model_feature"
-                    for c in model_ready.columns
+                    else "candidate_model_feature"
+                    for c in expanded_model_ready.columns
                 ],
             }).to_excel(
+                writer,
+                index=False,
+                sheet_name="Expanded_Feature_Dictionary",
+            )
+        with pd.ExcelWriter(MODEL_READY_XLSX, engine="openpyxl") as writer:
+            model_ready.to_excel(writer, index=False, sheet_name="Model_Ready_Vector")
+            compact_feature_dictionary().to_excel(
                 writer,
                 index=False,
                 sheet_name="Feature_Dictionary",
             )
     except Exception as exc:
         print(f"Warning: Excel output could not be written: {exc}")
-    return master, model_ready
+    return master, expanded_model_ready, model_ready
 
 
 def create_design(state: dict[str, Any]) -> None:
@@ -955,20 +1375,37 @@ def collect_solidworks_geometry(state: dict[str, Any]) -> None:
 
 
 def read_electro_geometry_output(path: Path) -> dict[str, Any]:
+    """Read canonical or legacy ELECTRO geometry feature/value CSV output."""
     features: dict[str, Any] = {}
+    name_map = {
+        # Legacy base geometry names.
+        "conductor_diameter": "conductor_diameter_mm",
+        "conductor_length": "conductor_length_mm",
+        "shield_diameter": "shield_diameter_mm",
+        "shield_length": "shield_length_mm",
+        "shell_diameter": "shell_mean_diameter_mm",
+
+        # Legacy upper/lower physical relationship names.
+        "upper_shield_to_shed_outward_delta_y": "top_shed_outward_delta_y_mm",
+        "lower_shield_to_shed_outward_delta_y": "bottom_shed_outward_delta_y_mm",
+        "upper_shield_to_shed_distance": "top_bulb_distance_to_nearest_shed_mm",
+        "lower_shield_to_shed_distance": "bottom_bulb_distance_to_nearest_shed_mm",
+        "upper_shield_to_shed_global_delta_x": "top_shed_global_delta_x_mm",
+        "upper_shield_to_shed_global_delta_y": "top_shed_global_delta_y_mm",
+        "upper_shield_to_shed_outward_delta_x": "top_shed_outward_delta_x_mm",
+        "lower_shield_to_shed_global_delta_x": "bottom_shed_global_delta_x_mm",
+        "lower_shield_to_shed_global_delta_y": "bottom_shed_global_delta_y_mm",
+        "lower_shield_to_shed_outward_delta_x": "bottom_shed_outward_delta_x_mm",
+        "shield_shed_alignment_tolerance": "shield_shed_alignment_tolerance_mm",
+    }
     with path.open(newline="", encoding="utf-8-sig") as f:
         for row in list(csv.reader(f))[1:]:
             if not row: break
             if len(row) >= 2:
                 # ELECTRO geometry is standardized to millimetres throughout
                 # the application and downstream ML pipeline.
-                mapped = {
-                    "conductor_diameter": "conductor_diameter_mm",
-                    "conductor_length": "conductor_length_mm",
-                    "shield_diameter": "shield_diameter_mm",
-                    "shield_length": "shield_length_mm",
-                    "shell_diameter": "shell_mean_diameter_mm",
-                }.get(row[0].strip(), row[0].strip())
+                source_name = row[0].strip()
+                mapped = name_map.get(source_name, source_name)
                 features[mapped] = clean_value(row[1])
     return features
 
@@ -982,11 +1419,32 @@ def collect_electro_geometry(state: dict[str, Any]) -> None:
     upsert_design(design)
 
 
+def _row_first_value(row: pd.Series, *names: str) -> Any:
+    """Return the first usable value from alternate extractor column names."""
+    for name in names:
+        value = clean_value(row.get(name))
+        if value is not None:
+            return value
+    return None
+
+
 def collect_creepage(state: dict[str, Any]) -> None:
     design_id, design = get_active_design(state); folder = design_folder(design_id)
-    out = folder / "creepage_distance_results.csv"
-    run_module_main("creepage", folder)
-    if not out.exists(): raise RuntimeError(f"Expected output missing: {out}")
+    returned_output = run_module_main("creepage", folder)
+    output_candidates = [
+        folder / "creepage_distance_results.csv",
+        folder / "drawing_extraction_results.csv",  # legacy pdf.py output
+    ]
+    if returned_output:
+        returned_path = Path(str(returned_output))
+        if not returned_path.is_absolute():
+            returned_path = folder / returned_path
+        output_candidates.insert(0, returned_path)
+    existing_outputs = [path for path in output_candidates if path.exists()]
+    if not existing_outputs:
+        expected = "\n".join(str(path) for path in output_candidates)
+        raise RuntimeError(f"Drawing extractor completed but no compatible output was found:\n{expected}")
+    out = max(existing_outputs, key=lambda path: path.stat().st_mtime)
     row = pd.read_csv(out).iloc[-1]
     design.update({
         "drawing_pdf_file": clean_value(row.get("pdf_file")),
@@ -995,6 +1453,14 @@ def collect_creepage(state: dict[str, Any]) -> None:
         "top_creepage_distance_in": clean_value(row.get("top_creepage_distance_in")),
         "bottom_creepage_distance_mm": clean_value(row.get("bottom_creepage_distance_mm")),
         "bottom_creepage_distance_in": clean_value(row.get("bottom_creepage_distance_in")),
+        "voltage_rating_kv": _row_first_value(
+            row,
+            "voltage_rating_kv", "rated_voltage_kv", "regular_voltage_rating_kv",
+        ),
+        "bil_voltage_kv": _row_first_value(
+            row,
+            "bil_voltage_kv", "rated_bil_voltage_kv", "basic_impulse_level_kv",
+        ),
         "creepage_output": str(out), "updated_at": now_iso(),
     })
     # Preserve the selected source PDF in the design folder when accessible.
@@ -1009,15 +1475,20 @@ def collect_creepage(state: dict[str, Any]) -> None:
 def edit_manual_design_features(state: dict[str, Any]) -> None:
     design_id, design = get_active_design(state)
     for key, label in [
-        ("bushing_id_mm", "Bushing inside diameter (mm)"),
-        ("outer_shell_mean_diameter_mm", "Outer shell mean diameter (mm)"),
-        ("top_bulb_to_nearest_shed_mm", "Top bulb distance to nearest shed (mm)"),
-        ("bottom_bulb_to_nearest_shed_mm", "Bottom bulb distance to nearest shed (mm)"),
+        ("shell_mean_diameter_mm", "Outer shell mean diameter (mm)"),
+        ("top_bulb_distance_to_nearest_shed_mm", "Top bulb distance to nearest shed (mm)"),
+        ("bottom_bulb_distance_to_nearest_shed_mm", "Bottom bulb distance to nearest shed (mm)"),
+        ("voltage_rating_kv", "Regular/rated operating voltage (kV)"),
         ("bil_voltage_kv", "Rated BIL voltage (kV)"),
     ]:
-        design[key] = prompt_optional_float(label, clean_value(design.get(key)))
-    for key, label in [("conductor_material", "Conductor material"), ("shield_material", "Shield material"), ("shell_material", "Shell material")]:
-        design[key] = prompt_text(label, str(design.get(key) or "")) or None
+        legacy_defaults = {
+            "shell_mean_diameter_mm": design.get("outer_shell_mean_diameter_mm"),
+            "voltage_rating_kv": design.get("rated_voltage_kv"),
+        }
+        current = clean_value(design.get(key))
+        if current is None:
+            current = clean_value(legacy_defaults.get(key))
+        design[key] = prompt_optional_float(label, current)
     design["updated_at"] = now_iso(); upsert_design(design)
 
 
@@ -1291,7 +1762,7 @@ def delete_design_interactive(state: dict[str, Any]) -> None:
 
     print("\nWARNING")
     print(f"Deleting '{design_id}' will remove 1 design and {sim_count} simulation record(s).")
-    print("The generated audit and model-ready vectors will then be rebuilt.")
+    print("The generated audit, expanded, and compact model-ready vectors will then be rebuilt.")
     if not confirm_yes_no("Continue with design deletion"):
         print("Deletion cancelled.")
         return
@@ -1350,7 +1821,7 @@ def manage_dataset(state: dict[str, Any]) -> None:
         print("2. Undo most recent simulation append")
         print("3. Delete a design/variant and its simulations")
         print("4. Search simulation records")
-        print("5. Rebuild audit and model-ready vectors")
+        print("5. Rebuild audit, expanded, and compact model-ready vectors")
         print("0. Return to main menu")
         choice = input("Choose an option: " ).strip()
 
@@ -1377,11 +1848,31 @@ def show_active_design(state: dict[str, Any]) -> None:
 
 
 def show_summary() -> None:
-    designs = load_design_db(); sims = load_simulation_db(); master, model_ready = rebuild_outputs()
+    designs = load_design_db(); sims = load_simulation_db(); master, expanded, model_ready = rebuild_outputs()
     print(f"\nDesigns: {len(designs)} | Simulations: {len(sims)}")
     print(f"Audit master: {len(master)} rows x {len(master.columns)} columns")
-    print(f"Model-ready: {len(model_ready)} rows x {len(model_ready.columns)} columns")
-    print(f"\n{DESIGN_DB_CSV}\n{SIMULATION_DB_CSV}\n{MASTER_CSV}\n{MODEL_READY_CSV}")
+    print(f"Expanded model-ready: {len(expanded)} rows x {len(expanded.columns)} columns")
+    print(
+        f"Compact model-ready: {len(model_ready)} rows x {len(model_ready.columns)} columns "
+        f"({len(COMPACT_MODEL_FEATURES)} predictors)"
+    )
+    print(
+        f"\n{DESIGN_DB_CSV}\n{SIMULATION_DB_CSV}\n{MASTER_CSV}"
+        f"\n{EXPANDED_MODEL_READY_CSV}\n{MODEL_READY_CSV}"
+    )
+    if not model_ready.empty:
+        unavailable = [
+            feature
+            for feature in COMPACT_MODEL_FEATURES
+            if feature in model_ready and model_ready[feature].isna().all()
+        ]
+        if unavailable:
+            source_map = compact_feature_dictionary().set_index("column_name")["collection_source"]
+            print("\nCompact features not yet populated in any record:")
+            for feature in unavailable:
+                print(f"  - {feature}  [{source_map.get(feature, 'source unavailable')}]")
+        else:
+            print("\nEvery compact predictor is populated in at least one record.")
 
 
 def main() -> None:
@@ -1397,11 +1888,11 @@ def main() -> None:
         print("2. Select existing design profile")
         print("3. Collect SolidWorks geometry")
         print("4. Collect ELECTRO segment geometry")
-        print("5. Collect TOP/BOTTOM creepage")
+        print("5. Collect TOP/BOTTOM creepage and voltage ratings")
         print("6. Enter/edit remaining design features")
         print("7. Launch ELECTRO setup / solver / extraction")
         print("8. Process ELECTRO export and append simulation")
-        print("9. Rebuild audit and model-ready vectors")
+        print("9. Rebuild audit, expanded, and compact model-ready vectors")
         print("10. Review active design")
         print("11. Show dataset summary")
         print("12. Manage/delete dataset records")

@@ -151,8 +151,9 @@ def configure_input_and_outputs(
 N_ZONES = 4
 ZONE_EDGES_PERCENT = [0, 35, 55, 85, 100]  # fallback/fixed only
 
-# Tier 1 = E-field post-simulation feature vector.
-# Geometry can still be merged later, but zoned Wavelet/FFT DSP features are now appended here.
+# Tier 1 = E-field + surface-bound-Q post-simulation feature vector.
+# Geometry is merged later. Zoned Wavelet/FFT DSP features currently describe
+# the E-field spatial shape; Q receives signed and absolute-magnitude summaries.
 TIER1_FIELD = "E"
 ZONING_FIELD = "E"
 PLOT_MEASUREMENT_MODE = "normalized"  # options: "normalized", "raw"
@@ -922,11 +923,63 @@ def add_basic_field_stats(features: dict, prefix: str, data: pd.DataFrame):
     features[f"{prefix}_peak_zone_id"] = int(data_valid.loc[max_idx, "zone_id"])
 
 
+def _mean_curve_auc(data: pd.DataFrame, absolute: bool = False) -> float:
+    """
+    Integrate each physical curve independently, then average curve AUCs.
+
+    This avoids joining the end of one curve to the beginning of another when
+    several curves share the same field. Averaging also prevents AUC magnitude
+    from changing merely because an export contains an additional Q curve.
+    """
+    auc_values = []
+    for _, curve in data.groupby("field_curve_id", sort=True):
+        curve = curve.sort_values("d_norm")
+        x = curve["d_norm"].to_numpy(dtype=float)
+        y = curve["value"].to_numpy(dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+        if valid.sum() < 2:
+            continue
+        if absolute:
+            y = np.abs(y)
+        auc_values.append(float(integrate(y[valid], x[valid])))
+    return float(np.mean(auc_values)) if auc_values else np.nan
+
+
+def add_surface_bound_q_stats(features: dict, prefix: str, data: pd.DataFrame):
+    """Add polarity-preserving and severity-oriented surface-bound-Q features."""
+    data_valid = data[np.isfinite(data["value"].to_numpy(dtype=float))].copy()
+    if data_valid.empty:
+        return
+
+    values = data_valid["value"].to_numpy(dtype=float)
+    abs_values = np.abs(values)
+    abs_peak_position = int(np.argmax(abs_values))
+    abs_peak_index = data_valid.index[abs_peak_position]
+
+    # Signed values preserve polarity behavior; absolute values describe stress
+    # severity without treating a large negative charge as a small response.
+    features[f"{prefix}_max"] = float(np.max(values))
+    features[f"{prefix}_min"] = float(np.min(values))
+    features[f"{prefix}_mean"] = float(np.mean(values))
+    features[f"{prefix}_p95"] = float(np.percentile(values, 95))
+    features[f"{prefix}_auc"] = _mean_curve_auc(data_valid, absolute=False)
+    features[f"{prefix}_abs_max"] = float(np.max(abs_values))
+    features[f"{prefix}_mean_abs"] = float(np.mean(abs_values))
+    features[f"{prefix}_p95_abs"] = float(np.percentile(abs_values, 95))
+    features[f"{prefix}_auc_abs"] = _mean_curve_auc(data_valid, absolute=True)
+    features[f"{prefix}_abs_peak_d_percent"] = float(data_valid.loc[abs_peak_index, "d_percent"])
+    features[f"{prefix}_abs_peak_x_mm"] = float(data_valid.loc[abs_peak_index, "x"])
+    features[f"{prefix}_abs_peak_y_mm"] = float(data_valid.loc[abs_peak_index, "y"])
+    features[f"{prefix}_abs_peak_z_mm"] = float(data_valid.loc[abs_peak_index, "z"])
+    features[f"{prefix}_abs_peak_zone_id"] = int(data_valid.loc[abs_peak_index, "zone_id"])
+
+
 def extract_tier1_input_vector(df: pd.DataFrame, zone_labels: dict, selected_method: str, pass_fail_label: str, pass_fail_code) -> dict:
     """
     Tier 1 post-simulation input vector.
 
-    Includes E-field features and, when enabled in main(), zoned DSP features from the selected zoning.
+    Includes E-field and surface-bound-Q features. When enabled in main(),
+    zoned E-field DSP features are appended from the selected zoning.
     Geometry features are still excluded here and can be merged later.
     """
     e_df = df[df["field"] == TIER1_FIELD].copy()
@@ -934,11 +987,15 @@ def extract_tier1_input_vector(df: pd.DataFrame, zone_labels: dict, selected_met
         available = sorted(df["field"].unique())
         raise ValueError(f"Tier 1 extraction requires field '{TIER1_FIELD}'. Available fields: {available}")
 
+    q_df = df[df["field"] == "Q"].copy()
+
     features = {
         "source_file": EXPORT_FILE.name,
         "num_total_points": int(len(df)),
         "num_E_points": int(len(e_df)),
-        "tier": "tier1_E_with_zoned_DSP_no_geometry",
+        "num_Q_points": int(len(q_df)),
+        "surface_bound_Q_available": int(not q_df.empty),
+        "tier": "tier1_E_Q_with_zoned_E_DSP_no_geometry",
         "zoning_method": selected_method,
         "zoning_field": ZONING_FIELD,
         "tier1_field": TIER1_FIELD,
@@ -1021,6 +1078,65 @@ def extract_tier1_input_vector(df: pd.DataFrame, zone_labels: dict, selected_met
         features["dominant_E_max_zone_label"] = max(zone_max_candidates, key=zone_max_candidates.get)
     if zone_auc_candidates:
         features["dominant_E_auc_zone_label"] = max(zone_auc_candidates, key=zone_auc_candidates.get)
+
+    # Surface-bound Q is optional for backward compatibility with E-only
+    # exports. When present, use the same physical zones derived from E.
+    if not q_df.empty:
+        global_q_prefix = "global_surface_bound_Q"
+        add_surface_bound_q_stats(features, global_q_prefix, q_df)
+        global_q_abs_max = features.get(f"{global_q_prefix}_abs_max", np.nan)
+        global_q_auc_abs = features.get(f"{global_q_prefix}_auc_abs", np.nan)
+
+        if f"{global_q_prefix}_abs_peak_zone_id" in features:
+            peak_zone_id = int(features[f"{global_q_prefix}_abs_peak_zone_id"])
+            features[f"{global_q_prefix}_abs_peak_zone_label"] = zone_labels.get(
+                peak_zone_id,
+                "unknown",
+            )
+
+        # Retain curve-specific Q summaries in the expanded research vector.
+        for field_curve_id in sorted(q_df["field_curve_id"].unique()):
+            curve_df = q_df[q_df["field_curve_id"] == field_curve_id]
+            add_surface_bound_q_stats(
+                features,
+                f"surface_bound_Q_curve{int(field_curve_id)}",
+                curve_df,
+            )
+
+        q_zone_max_candidates = {}
+        q_zone_auc_candidates = {}
+        for zone_id, label in zone_labels.items():
+            if label == "ignore":
+                continue
+            zone_q_df = q_df[q_df["zone_id"] == zone_id]
+            if zone_q_df.empty:
+                continue
+
+            prefix = f"zone{zone_id}_{label}_surface_bound_Q"
+            add_surface_bound_q_stats(features, prefix, zone_q_df)
+            features[f"{prefix}_abs_max_over_global_surface_bound_Q_abs_max"] = safe_divide(
+                features.get(f"{prefix}_abs_max", np.nan),
+                global_q_abs_max,
+            )
+            features[f"{prefix}_auc_abs_over_global_surface_bound_Q_auc_abs"] = safe_divide(
+                features.get(f"{prefix}_auc_abs", np.nan),
+                global_q_auc_abs,
+            )
+            q_zone_max_candidates[label] = features.get(f"{prefix}_abs_max", np.nan)
+            q_zone_auc_candidates[label] = features.get(f"{prefix}_auc_abs", np.nan)
+
+        finite_q_max = {k: v for k, v in q_zone_max_candidates.items() if np.isfinite(v)}
+        finite_q_auc = {k: v for k, v in q_zone_auc_candidates.items() if np.isfinite(v)}
+        if finite_q_max:
+            features["dominant_surface_bound_Q_abs_max_zone_label"] = max(
+                finite_q_max,
+                key=finite_q_max.get,
+            )
+        if finite_q_auc:
+            features["dominant_surface_bound_Q_auc_abs_zone_label"] = max(
+                finite_q_auc,
+                key=finite_q_auc.get,
+            )
 
     return features
 
@@ -1215,8 +1331,8 @@ def main(export_file=None, output_dir=None):
 
     print("\nDone.")
     print(
-        "Tier 1 output now includes zoned E-field features plus "
-        "zoned Wavelet/FFT DSP features."
+        "Tier 1 output now includes zoned E-field features, signed/absolute "
+        "surface-bound-Q features, and zoned E-field Wavelet/FFT DSP features."
     )
     print(
         "Geometry features are still excluded here and should be "
