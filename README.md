@@ -297,5 +297,6 @@ Future work
 - Larger training datasets
 - Improved recommendation engine
 - Deep-learning experimentation
+- Create a user-manual
 
 ---
