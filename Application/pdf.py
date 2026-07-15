@@ -60,7 +60,10 @@ except ImportError:
     pytesseract = None
 
 
-OUTPUT_CSV = "drawing_extraction_results.csv"
+# Canonical filename consumed by automation_application.py. The centralized
+# application also recognizes the former drawing_extraction_results.csv name
+# so previously collected design folders remain usable.
+OUTPUT_CSV = "creepage_distance_results.csv"
 
 # Leave blank when Tesseract is available through PATH.
 # Example:
@@ -1932,7 +1935,7 @@ def append_csv(
     return output_path
 
 
-def main() -> None:
+def main() -> Optional[Path]:
     status("\nDrawing extractor — creepage and voltage ratings")
     status("------------------------------------------------")
 
@@ -1940,7 +1943,7 @@ def main() -> None:
 
     if pdf_path is None:
         status("No PDF selected.")
-        return
+        return None
 
     status(f"\nSelected PDF: {pdf_path}")
 
@@ -2109,6 +2112,7 @@ def main() -> None:
         )
 
     status(f"\nSaved to: {output_path.resolve()}")
+    return output_path.resolve()
     input("\nPress Enter to close.")
 
 
