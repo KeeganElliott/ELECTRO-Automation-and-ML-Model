@@ -193,59 +193,59 @@ Typical workflow
 
 ```
 
-SolidWorks Geometry
+SolidWorks or ELECTRO Geometry
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Geometry Extraction
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 ELECTRO Automation
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Simulation
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Result Extraction
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 FFT / Wavelet Processing
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Feature Engineering
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Dataset Generation
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Machine Learning
 
-&#x20;       │
+       │
 
-&#x20;       ▼
+       ▼
 
 Predictive Design Assistance
 
