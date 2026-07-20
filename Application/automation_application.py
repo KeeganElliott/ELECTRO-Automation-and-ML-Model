@@ -16,6 +16,7 @@ Generated/imported artifacts are organized as:
 """
 
 import csv
+import gc
 import importlib
 import importlib.util
 import subprocess
@@ -125,6 +126,31 @@ SCRIPT_CANDIDATES = {
     "simulation": ["electro_automation.py"],
 }
 
+# Option 13 uses the same COM program identifier as the companion ELECTRO
+# scripts whenever it can discover one. The fallback is the identifier used by
+# current ELECTRO Python automation examples. Override it without editing this
+# file by setting ELECTRO_COM_PROGID in Windows before launching the app.
+DEFAULT_ELECTRO_COM_PROGID = "Electro.Application"
+
+# Current shed-removal creepage calculator. These constants are specific to
+# the 20-700-000 design and must not be generalized to another design family.
+SHED_CALCULATION_DESIGN = "20-700-000"
+EXTERNAL_BASE_CREEPAGE_MM = 1736.0
+INTERNAL_BASE_CREEPAGE_MM = 1397.0
+EXTERNAL_CREEPAGE_LOSS_PER_SHED_MM = 67.0
+INTERNAL_CREEPAGE_LOSS_PER_SHED_MM = 37.0
+MIN_EXTERNAL_CREEPAGE_MM = 1473.2
+MIN_INTERNAL_CREEPAGE_MM = 1168.4
+MAX_EXTERNAL_SHEDS_REMOVED = int(
+    (EXTERNAL_BASE_CREEPAGE_MM - MIN_EXTERNAL_CREEPAGE_MM)
+    / EXTERNAL_CREEPAGE_LOSS_PER_SHED_MM
+)
+MAX_INTERNAL_SHEDS_REMOVED = int(
+    (INTERNAL_BASE_CREEPAGE_MM - MIN_INTERNAL_CREEPAGE_MM)
+    / INTERNAL_CREEPAGE_LOSS_PER_SHED_MM
+)
+MM_PER_INCH = 25.4
+
 # Provenance, paths, and free text are excluded from the learning matrix.
 # design_id and simulation_id are retained as non-predictive metadata so the
 # training script can group by design and trace individual simulations.
@@ -138,6 +164,13 @@ MODEL_EXCLUDE_EXACT = {
     "solidworks_output", "electro_geometry_output", "creepage_output",
     "solidworks_assembly", "conductor_component", "shield_diameter_component",
     "shield_length_component",
+    # Retained in the design profile for correction auditing, but excluded
+    # from learning matrices so only the corrected canonical values are used.
+    "shield_diameter_segment_raw_mm", "shell_mean_diameter_segment_raw_mm",
+    "diameter_correction_mm", "diameter_correction_sign",
+    "diameter_correction_conductor_nominal_mm",
+    "diameter_correction_conductor_nominal_label",
+    "diameter_calculation_method",
 }
 MODEL_EXCLUDE_SUBSTRINGS = ("_path", "_file", "_output", "_error", "context", "keyword")
 
@@ -304,6 +337,27 @@ COMPACT_MODEL_FEATURES = [
 ]
 
 assert len(COMPACT_MODEL_FEATURES) == 75, "Compact model schema must remain exactly 75 features."
+
+# Design-level model inputs that may be manually overridden. Simulation
+# conditions, E/Q stress results, DSP features, labels, derived ratios, and
+# provenance fields are intentionally not editable through this menu.
+MANUALLY_EDITABLE_DESIGN_FEATURES = [
+    ("conductor_diameter_mm", "Conductor diameter (mm)"),
+    ("conductor_length_mm", "Conductor length (mm)"),
+    ("shield_diameter_mm", "Shield diameter (mm)"),
+    ("shield_length_mm", "Shield length (mm)"),
+    ("shell_mean_diameter_mm", "Shell mean diameter (mm)"),
+    ("top_creepage_distance_mm", "Top/external creepage distance (mm)"),
+    ("bottom_creepage_distance_mm", "Bottom/internal creepage distance (mm)"),
+    ("top_bulb_distance_to_nearest_shed_mm", "Top bulb distance to nearest shed (mm)"),
+    ("bottom_bulb_distance_to_nearest_shed_mm", "Bottom bulb distance to nearest shed (mm)"),
+    ("top_shed_outward_delta_x_mm", "Top shed outward delta X (mm)"),
+    ("top_shed_outward_delta_y_mm", "Top shed outward delta Y (mm)"),
+    ("bottom_shed_outward_delta_x_mm", "Bottom shed outward delta X (mm)"),
+    ("bottom_shed_outward_delta_y_mm", "Bottom shed outward delta Y (mm)"),
+    ("voltage_rating_kv", "Regular/rated operating voltage (kV)"),
+    ("bil_voltage_kv", "Rated BIL voltage (kV)"),
+]
 
 # Current and legacy collection scripts have used several equivalent names.
 # The compact vector exposes only the canonical name on the left. Matching is
@@ -670,6 +724,30 @@ def prompt_optional_float(label: str, default: float | None = None) -> float | N
             return float(value)
         except ValueError:
             print("Enter a number or N/A.")
+
+
+def prompt_nonnegative_int(
+    label: str,
+    default: int = 0,
+    maximum: int | None = None,
+) -> int:
+    """Prompt for a whole-number count that cannot be negative."""
+    while True:
+        value = input(f"{label} [{default}]: ").strip()
+        if not value:
+            return int(default)
+        try:
+            parsed = int(value)
+        except ValueError:
+            print("Enter a whole number greater than or equal to zero.")
+            continue
+        if parsed < 0:
+            print("The number of removed sheds cannot be negative.")
+            continue
+        if maximum is not None and parsed > maximum:
+            print(f"Enter a whole number from 0 through {maximum}.")
+            continue
+        return parsed
 
 
 def choose_file(title: str, patterns: list[tuple[str, str]]) -> Path | None:
@@ -1234,7 +1312,9 @@ def compact_feature_dictionary() -> pd.DataFrame:
         else:
             surrogate_use = "excluded"
 
-        if column in {"voltage_rating_kv", "bil_voltage_kv", "top_creepage_distance_mm", "bottom_creepage_distance_mm"}:
+        if column in {"top_creepage_distance_mm", "bottom_creepage_distance_mm"}:
+            collection_source = "pdf.py extraction or 20-700-000 shed calculation"
+        elif column in {"voltage_rating_kv", "bil_voltage_kv"}:
             collection_source = "pdf.py drawing extraction"
         elif column in {
             "conductor_diameter_mm", "conductor_length_mm", "shield_diameter_mm",
@@ -1243,7 +1323,10 @@ def compact_feature_dictionary() -> pd.DataFrame:
             "top_shed_outward_delta_y_mm", "bottom_shed_outward_delta_y_mm",
             "top_shed_outward_delta_x_mm", "bottom_shed_outward_delta_x_mm",
         }:
-            collection_source = "electro_geometry.py or compatible geometry extractor"
+            collection_source = (
+                "electro_geometry.py segment extraction; optional 20-700-000 "
+                "shield/shell diameter correction"
+            )
         elif family in {"e_stress", "q_stress", "dsp"}:
             collection_source = "tier1.py simulation export analysis"
         elif role == "derived_model_feature":
@@ -1378,6 +1461,14 @@ def read_electro_geometry_output(path: Path) -> dict[str, Any]:
     """Read canonical or legacy ELECTRO geometry feature/value CSV output."""
     features: dict[str, Any] = {}
     name_map = {
+        # Persisted ELECTRO segment references.
+        "origin_segment_id": "origin_segment_id",
+        "conductor_segment_id": "conductor_segment_id",
+        "shield_segment_id": "shield_segment_id",
+        "largest_diameter_shell_segment_id": "largest_diameter_shell_segment_id",
+        "top_shed_segment_id": "top_shed_segment_id",
+        "bottom_shed_segment_id": "bottom_shed_segment_id",
+
         # Legacy base geometry names.
         "conductor_diameter": "conductor_diameter_mm",
         "conductor_length": "conductor_length_mm",
@@ -1410,13 +1501,51 @@ def read_electro_geometry_output(path: Path) -> dict[str, Any]:
     return features
 
 
-def collect_electro_geometry(state: dict[str, Any]) -> None:
+def collect_electro_geometry_from_segments(
+    state: dict[str, Any],
+    apply_20_700_diameter_correction: bool = False,
+) -> None:
     design_id, design = get_active_design(state); folder = design_folder(design_id)
-    run_module_main("electro_geometry", folder)
+    if apply_20_700_diameter_correction:
+        print(
+            "\nWARNING: The shield/shell diameter correction was developed for "
+            f"20-700-000. Active design: '{design_id}'. Verify that the formula "
+            "is appropriate before using the result."
+        )
+
+    run_module_main(
+        "electro_geometry",
+        folder,
+        main_kwargs={
+            "apply_20_700_diameter_correction": apply_20_700_diameter_correction,
+        },
+    )
     out = folder / "electro_simple_ref_features.csv"
     if not out.exists(): raise RuntimeError(f"Expected output missing: {out}")
     design.update(read_electro_geometry_output(out)); design["electro_geometry_output"] = str(out); design["updated_at"] = now_iso()
     upsert_design(design)
+
+
+def collect_electro_geometry(state: dict[str, Any]) -> None:
+    """Route option 4 to ordinary or 20-700-000-corrected extraction."""
+    print("\nELECTRO segment-geometry workflow")
+    print("---------------------------------")
+    print("1. Standard segment-geometry extraction")
+    print("2. 20-700-000 extraction with corrected shield and shell diameters")
+    print("0. Cancel")
+
+    while True:
+        choice = input("Choose 1, 2, or 0: ").strip()
+        if choice == "1":
+            collect_electro_geometry_from_segments(state, False)
+            return
+        if choice == "2":
+            collect_electro_geometry_from_segments(state, True)
+            return
+        if choice == "0":
+            print("ELECTRO geometry workflow cancelled.")
+            return
+        print("Invalid selection. Enter 1, 2, or 0.")
 
 
 def _row_first_value(row: pd.Series, *names: str) -> Any:
@@ -1428,7 +1557,8 @@ def _row_first_value(row: pd.Series, *names: str) -> Any:
     return None
 
 
-def collect_creepage(state: dict[str, Any]) -> None:
+def collect_creepage_from_pdf(state: dict[str, Any]) -> None:
+    """Run the existing PDF creepage and voltage-rating extraction workflow."""
     design_id, design = get_active_design(state); folder = design_folder(design_id)
     returned_output = run_module_main("creepage", folder)
     output_candidates = [
@@ -1472,24 +1602,193 @@ def collect_creepage(state: dict[str, Any]) -> None:
     upsert_design(design)
 
 
+def calculate_20_700_000_creepage_values(
+    external_sheds_removed: int,
+    internal_sheds_removed: int,
+) -> dict[str, float | int]:
+    """Calculate remaining creepage for the 20-700-000 shed geometry."""
+    if external_sheds_removed < 0 or internal_sheds_removed < 0:
+        raise ValueError("Removed-shed counts must be greater than or equal to zero.")
+
+    external_mm = (
+        EXTERNAL_BASE_CREEPAGE_MM
+        - external_sheds_removed * EXTERNAL_CREEPAGE_LOSS_PER_SHED_MM
+    )
+    internal_mm = (
+        INTERNAL_BASE_CREEPAGE_MM
+        - internal_sheds_removed * INTERNAL_CREEPAGE_LOSS_PER_SHED_MM
+    )
+    if external_mm < MIN_EXTERNAL_CREEPAGE_MM:
+        raise ValueError(
+            f"External creepage would be {external_mm:.1f} mm, below the "
+            f"{MIN_EXTERNAL_CREEPAGE_MM:.1f} mm minimum. Remove fewer external sheds."
+        )
+    if internal_mm < MIN_INTERNAL_CREEPAGE_MM:
+        raise ValueError(
+            f"Internal creepage would be {internal_mm:.1f} mm, below the "
+            f"{MIN_INTERNAL_CREEPAGE_MM:.1f} mm minimum. Remove fewer internal sheds."
+        )
+
+    return {
+        "external_sheds_removed": int(external_sheds_removed),
+        "internal_sheds_removed": int(internal_sheds_removed),
+        "external_creepage_distance_mm": float(external_mm),
+        "internal_creepage_distance_mm": float(internal_mm),
+        # The existing model-ready schema uses top/bottom. For this design,
+        # external maps to the 1736 mm/top path and internal to 1397 mm/bottom.
+        "top_creepage_distance_mm": float(external_mm),
+        "bottom_creepage_distance_mm": float(internal_mm),
+        "top_creepage_distance_in": float(external_mm / MM_PER_INCH),
+        "bottom_creepage_distance_in": float(internal_mm / MM_PER_INCH),
+    }
+
+
+def calculate_20_700_000_creepage(state: dict[str, Any]) -> None:
+    """Apply the 20-700-000 shed formulas to the active design after warning."""
+    design_id, design = get_active_design(state)
+    print("\n20-700-000 shed-removal creepage calculator")
+    print("------------------------------------------")
+    print(
+        "WARNING: These shed-removal creepage formulas were developed for "
+        f"20-700-000. Active design: '{design_id}'. Verify that the formulas "
+        "are appropriate before using the result."
+    )
+    print(
+        "External creepage = 1736 mm - external sheds removed x 67 mm\n"
+        "Internal creepage = 1397 mm - internal sheds removed x 37 mm\n"
+        "Minimum remaining external creepage: 1473.2 mm\n"
+        "Minimum remaining internal creepage: 1168.4 mm"
+    )
+
+    external_removed = prompt_nonnegative_int(
+        f"Number of external sheds removed (0-{MAX_EXTERNAL_SHEDS_REMOVED})",
+        0,
+        MAX_EXTERNAL_SHEDS_REMOVED,
+    )
+    internal_removed = prompt_nonnegative_int(
+        f"Number of internal sheds removed (0-{MAX_INTERNAL_SHEDS_REMOVED})",
+        0,
+        MAX_INTERNAL_SHEDS_REMOVED,
+    )
+    calculated = calculate_20_700_000_creepage_values(
+        external_removed,
+        internal_removed,
+    )
+
+    print("\nCalculated remaining creepage")
+    print(
+        f"  External/top: {calculated['external_creepage_distance_mm']:.3f} mm "
+        f"({calculated['top_creepage_distance_in']:.4f} in)"
+    )
+    print(
+        f"  Internal/bottom: {calculated['internal_creepage_distance_mm']:.3f} mm "
+        f"({calculated['bottom_creepage_distance_in']:.4f} in)"
+    )
+    print(
+        f"  Total: "
+        f"{calculated['external_creepage_distance_mm'] + calculated['internal_creepage_distance_mm']:.3f} mm"
+    )
+
+    if not confirm_yes_no("Save these calculated creepage values", default=True):
+        print("Calculated values were not saved.")
+        return
+
+    design.update(calculated)
+    design.update({
+        "creepage_calculation_method": "20-700-000 shed-removal calculation",
+        "creepage_calculation_design_basis": SHED_CALCULATION_DESIGN,
+        "creepage_output": "calculated from removed shed counts",
+        "updated_at": now_iso(),
+    })
+    upsert_design(design)
+    print("Calculated creepage values saved to the active design profile.")
+
+
+def collect_creepage(state: dict[str, Any]) -> None:
+    """Route option 5 to PDF extraction or the design-specific calculator."""
+    print("\nCreepage and voltage-rating workflow")
+    print("------------------------------------")
+    print("1. PDF extraction: creepage distances and voltage ratings")
+    print("2. Creepage calculation from removed sheds (20-700-000 formula basis)")
+    print("0. Cancel")
+
+    while True:
+        choice = input("Choose 1, 2, or 0: ").strip()
+        if choice == "1":
+            collect_creepage_from_pdf(state)
+            return
+        if choice == "2":
+            calculate_20_700_000_creepage(state)
+            return
+        if choice == "0":
+            print("Creepage workflow cancelled.")
+            return
+        print("Invalid selection. Enter 1, 2, or 0.")
+
+
 def edit_manual_design_features(state: dict[str, Any]) -> None:
     design_id, design = get_active_design(state)
-    for key, label in [
-        ("shell_mean_diameter_mm", "Outer shell mean diameter (mm)"),
-        ("top_bulb_distance_to_nearest_shed_mm", "Top bulb distance to nearest shed (mm)"),
-        ("bottom_bulb_distance_to_nearest_shed_mm", "Bottom bulb distance to nearest shed (mm)"),
-        ("voltage_rating_kv", "Regular/rated operating voltage (kV)"),
-        ("bil_voltage_kv", "Rated BIL voltage (kV)"),
-    ]:
-        legacy_defaults = {
-            "shell_mean_diameter_mm": design.get("outer_shell_mean_diameter_mm"),
-            "voltage_rating_kv": design.get("rated_voltage_kv"),
-        }
+    legacy_defaults = {
+        "shell_mean_diameter_mm": design.get("outer_shell_mean_diameter_mm"),
+        "voltage_rating_kv": design.get("rated_voltage_kv"),
+    }
+    changed = False
+
+    while True:
+        print(f"\nManually editable design inputs for '{design_id}'")
+        print("Simulation-derived E/Q/DSP data and simulation metadata are excluded.")
+        print("Select a variable by number; derived clearances and ratios rebuild automatically.")
+        print("-" * 78)
+        for index, (key, label) in enumerate(MANUALLY_EDITABLE_DESIGN_FEATURES, 1):
+            current = clean_value(design.get(key))
+            if current is None:
+                current = clean_value(legacy_defaults.get(key))
+            shown = "N/A" if current is None else current
+            print(f"{index:>2}. {label} [{key}] = {shown}")
+        print(" 0. Finish and save changes")
+
+        choice = input(
+            f"Choose 0-{len(MANUALLY_EDITABLE_DESIGN_FEATURES)}: "
+        ).strip()
+        if choice == "0":
+            if changed:
+                design["updated_at"] = now_iso()
+                upsert_design(design)
+                print("Manual design-input changes saved; model-ready vectors rebuilt.")
+            else:
+                print("No manual design-input changes were made.")
+            return
+
+        try:
+            selected_index = int(choice)
+        except ValueError:
+            print("Invalid selection. Enter one of the listed numbers.")
+            continue
+        if not 1 <= selected_index <= len(MANUALLY_EDITABLE_DESIGN_FEATURES):
+            print("Invalid selection. Enter one of the listed numbers.")
+            continue
+
+        key, label = MANUALLY_EDITABLE_DESIGN_FEATURES[selected_index - 1]
         current = clean_value(design.get(key))
         if current is None:
             current = clean_value(legacy_defaults.get(key))
         design[key] = prompt_optional_float(label, current)
-    design["updated_at"] = now_iso(); upsert_design(design)
+        changed = True
+
+        if key == "top_creepage_distance_mm":
+            value = clean_value(design[key])
+            design["top_creepage_distance_in"] = (
+                None if value is None else float(value) / MM_PER_INCH
+            )
+            design["creepage_calculation_method"] = "manual override"
+        elif key == "bottom_creepage_distance_mm":
+            value = clean_value(design[key])
+            design["bottom_creepage_distance_in"] = (
+                None if value is None else float(value) / MM_PER_INCH
+            )
+            design["creepage_calculation_method"] = "manual override"
+        elif key in {"shield_diameter_mm", "shell_mean_diameter_mm"}:
+            design["diameter_calculation_method"] = "manual override"
 
 
 def collect_simulation_metadata() -> dict[str, Any]:
@@ -1843,8 +2142,47 @@ def manage_dataset(state: dict[str, Any]) -> None:
 
 def show_active_design(state: dict[str, Any]) -> None:
     design_id, design = get_active_design(state)
-    print(f"\nActive design: {design_id}\nFolder: {design_folder(design_id)}\n" + "-"*72)
-    for key, value in sorted(design.items()): print(f"{key}: {value}")
+
+    print(
+        f"\nActive design: {design_id}\n"
+        f"Folder: {design_folder(design_id)}\n"
+        + "-" * 72
+    )
+
+    segment_fields = [
+        ("origin_segment_id", "Origin"),
+        ("conductor_segment_id", "Conductor"),
+        ("shield_segment_id", "Shield"),
+        ("largest_diameter_shell_segment_id", "Largest-diameter shell"),
+        ("top_shed_segment_id", "Top shed"),
+        ("bottom_shed_segment_id", "Bottom shed"),
+    ]
+
+    print("\nSaved ELECTRO segment IDs")
+    print("--------------------------")
+    segment_values_present = False
+
+    for key, label in segment_fields:
+        value = clean_value(design.get(key))
+        if value is not None:
+            segment_values_present = True
+            # CSV loading may represent integer IDs as floats, such as 422.0.
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            print(f"{label}: {value}")
+
+    if not segment_values_present:
+        print(
+            "No segment IDs have been saved for this design yet. "
+            "Run option 4 to collect ELECTRO segment geometry."
+        )
+
+    print("\nAll active-design fields")
+    print("------------------------")
+    segment_keys = {key for key, _ in segment_fields}
+    for key, value in sorted(design.items()):
+        if key not in segment_keys:
+            print(f"{key}: {value}")
 
 
 def show_summary() -> None:
@@ -1875,6 +2213,174 @@ def show_summary() -> None:
             print("\nEvery compact predictor is populated in at least one record.")
 
 
+def _discover_electro_com_progids() -> list[str]:
+    """Find the COM identifier already used by the local ELECTRO scripts."""
+    candidates: list[str] = []
+
+    configured = os.environ.get("ELECTRO_COM_PROGID", "").strip()
+    if configured:
+        candidates.append(configured)
+
+    call_pattern = re.compile(
+        r"(?:Dispatch|EnsureDispatch|GetActiveObject)\s*\(\s*[rubfRUBF]*"
+        r"['\"]([^'\"]+)['\"]"
+    )
+    for key in ("simulation", "electro_geometry"):
+        try:
+            script = resolve_script(key)
+            source = script.read_text(encoding="utf-8-sig", errors="ignore")
+        except (FileNotFoundError, OSError):
+            continue
+        for progid in call_pattern.findall(source):
+            # Ignore unrelated automation servers if a companion script uses
+            # more than one COM application.
+            if "solidworks" not in progid.lower() and progid not in candidates:
+                candidates.append(progid)
+
+    if DEFAULT_ELECTRO_COM_PROGID not in candidates:
+        candidates.append(DEFAULT_ELECTRO_COM_PROGID)
+    return candidates
+
+
+def _attach_to_electro() -> tuple[Any, str]:
+    """Attach to ELECTRO using the same COM identifier as companion scripts."""
+    import win32com.client
+
+    errors: list[str] = []
+    progids = _discover_electro_com_progids()
+
+    # First try the Running Object Table so this option does not accidentally
+    # start a second application while an existing instance is available.
+    for progid in progids:
+        try:
+            return win32com.client.GetActiveObject(progid), progid
+        except Exception as exc:
+            errors.append(f"GetActiveObject({progid!r}): {exc}")
+
+    # Some ELECTRO COM servers are single-instance but are not registered in
+    # the Running Object Table. Dispatch then returns their active instance.
+    for progid in progids:
+        try:
+            return win32com.client.Dispatch(progid), progid
+        except Exception as exc:
+            errors.append(f"Dispatch({progid!r}): {exc}")
+
+    details = "\n".join(f"  {line}" for line in errors)
+    raise RuntimeError(
+        "Could not connect to ELECTRO. Open ELECTRO and its model, then retry "
+        "option 13. If your installation uses a different COM identifier, set "
+        "ELECTRO_COM_PROGID before launching this application.\n" + details
+    )
+
+
+def stabilize_electro_after_simulation() -> None:
+    """Optionally save ELECTRO, clear temporary displays, and release COM state."""
+    print("\nELECTRO post-simulation stability cleanup")
+    print("------------------------------------------")
+    print("Run this only after the required E/Q graphs and result files are exported.")
+    print("This option can save the model before removing temporary plots/streamlines.")
+    print("It does NOT delete the calculated solution, mesh, geometry, or assignments.")
+
+    if not confirm_yes_no("Have all required simulation results been exported?"):
+        print("Cleanup cancelled. Export/process the required results first.")
+        return
+
+    save_before_cleanup = confirm_yes_no(
+        "Save the active ELECTRO model before cleanup?",
+        default=True,
+    )
+
+    pythoncom = None
+    electro = None
+    com_initialized = False
+    completed: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        import pythoncom as _pythoncom
+
+        pythoncom = _pythoncom
+        pythoncom.CoInitialize()
+        com_initialized = True
+
+        electro, progid = _attach_to_electro()
+        print(f"Connected to ELECTRO ({progid}).")
+
+        try:
+            model_path = electro.File_GetModelPath()
+        except Exception as exc:
+            model_path = None
+            warnings.append(f"Could not read the active model path: {exc}")
+
+        if save_before_cleanup:
+            # When saving is requested, do not modify analysis displays unless
+            # the current model is first protected successfully.
+            try:
+                electro.File_Save()
+                completed.append("active model saved")
+            except Exception as exc:
+                raise RuntimeError(
+                    "ELECTRO could not save the active model, so cleanup stopped "
+                    f"before modifying any analysis displays: {exc}"
+                ) from exc
+
+            if model_path:
+                print(f"Saved model: {model_path}")
+        else:
+            completed.append("model save skipped by user")
+            print("WARNING: Continuing cleanup without saving the active model.")
+
+        # These calls target analysis-view objects only. ELECTRO versions can
+        # expose different signatures, so each cleanup is isolated and a
+        # failure does not prevent the remaining safe steps.
+        try:
+            electro.Analysis_DeleteStreamlines_All()
+            completed.append("temporary streamlines cleared")
+        except Exception as exc:
+            warnings.append(f"Streamline cleanup was unavailable: {exc}")
+
+        try:
+            electro.Analysis_DeletePlot()
+            completed.append("active temporary plot cleared")
+        except Exception as exc:
+            warnings.append(
+                "Plot cleanup was unavailable or required a plot identifier: "
+                f"{exc}"
+            )
+
+        try:
+            electro.Window_Refresh()
+            completed.append("ELECTRO window refreshed")
+        except Exception as exc:
+            warnings.append(f"Window refresh was unavailable: {exc}")
+
+    finally:
+        # Dropping the automation application's references is deliberately
+        # safer than calling the raw COM Release method directly.
+        electro = None
+        gc.collect()
+        if pythoncom is not None:
+            try:
+                pythoncom.CoFreeUnusedLibraries()
+                completed.append("unused Python COM libraries released")
+            except Exception as exc:
+                warnings.append(f"Python COM library cleanup was unavailable: {exc}")
+            if com_initialized:
+                pythoncom.CoUninitialize()
+
+    print("\nOption 13 completed.")
+    for item in completed:
+        print(f"  - {item}")
+    if warnings:
+        print("\nNon-fatal warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    print(
+        "If ELECTRO continues becoming unstable, close and reopen it after "
+        "this cleanup to fully recycle ELECTRO's internal process memory."
+    )
+
+
 def main() -> None:
     ensure_runtime_dependencies()
     print(f"Running with Python: {sys.executable}")
@@ -1888,14 +2394,15 @@ def main() -> None:
         print("2. Select existing design profile")
         print("3. Collect SolidWorks geometry")
         print("4. Collect ELECTRO segment geometry")
-        print("5. Collect TOP/BOTTOM creepage and voltage ratings")
-        print("6. Enter/edit remaining design features")
+        print("5. Extract PDF data or calculate 20-700-000 creepage")
+        print("6. Manually review/edit design-level input variables")
         print("7. Launch ELECTRO setup / solver / extraction")
         print("8. Process ELECTRO export and append simulation")
         print("9. Rebuild audit, expanded, and compact model-ready vectors")
         print("10. Review active design")
         print("11. Show dataset summary")
         print("12. Manage/delete dataset records")
+        print("13. Stabilize ELECTRO after simulation")
         print("0. Exit")
         choice = input("Choose an option: ").strip()
         try:
@@ -1907,12 +2414,20 @@ def main() -> None:
             elif choice == "6": edit_manual_design_features(state)
             elif choice == "7":
                 design_id, _ = get_active_design(state)
-                run_module_main("simulation", design_folder(design_id))
+                run_module_main(
+                    "simulation",
+                    design_folder(design_id),
+                    main_kwargs={
+                        "show_bil_guidance": True,
+                        "use_legacy_static_workflow": False,
+                    },
+                )
             elif choice == "8": process_export_and_append(state)
             elif choice == "9": rebuild_outputs(); print("Outputs rebuilt.")
             elif choice == "10": show_active_design(state)
             elif choice == "11": show_summary()
             elif choice == "12": manage_dataset(state)
+            elif choice == "13": stabilize_electro_after_simulation()
             elif choice == "0": break
             else: print("Invalid selection.")
         except KeyboardInterrupt:

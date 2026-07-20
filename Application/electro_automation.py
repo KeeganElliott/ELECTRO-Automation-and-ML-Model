@@ -1,6 +1,6 @@
 """
 ELECTRO Boundary E-field Extraction + DSP Automation
-Version: 2026-07-13-electro-only-transient-static-setup-v13
+Version: 2026-07-16-strict-voltage-modes-attached-definitions-v15
 
 Purpose
 -------
@@ -76,6 +76,43 @@ DEFAULT_GROUND_VOLTAGE_NAME = "gnd"
 DEFAULT_TRANSIENT_SOURCE_NAME = "impulse"
 DEFAULT_TRANSIENT_GROUND_SOURCE_NAME = "Ground"
 DEFAULT_STATIC_HV_VOLTAGE = 350000.0
+DEFAULT_STATIC_HV_VOLTAGE_KV = 350.0
+
+# The default workflow updates voltage definitions that the user has already
+# attached to the appropriate objects in ELECTRO. The older static assignment
+# workflow is retained below and can be selected explicitly when needed.
+USE_LEGACY_STATIC_ASSIGNMENT_WORKFLOW = False
+
+# Equivalent model-tree names supported across the current ELECTRO templates.
+# The descriptive name is preferred; the generic CAD-import name is a fallback.
+OBJECT_NAME_ALIASES = {
+    "conductor": ("conductor", "Object 1"),
+    "shell": ("shell", "Object 2"),
+    "gnd": ("gnd", "Object 3"),
+}
+
+# Either name may be entered by the user. The requested name is tried first,
+# followed by its equivalent alias if ELECTRO rejects the first assignment.
+TRANSIENT_SOURCE_ALIASES = {
+    "impulse": ("impulse", "Source 1"),
+    "source 1": ("Source 1", "impulse"),
+}
+
+# Existing voltage definitions may use either descriptive or generic default
+# names. These are voltage-tree names, not geometry-object names.
+VOLTAGE_NAME_ALIASES = {
+    "source": ("source", "Voltage 1"),
+    "voltage 1": ("Voltage 1", "source"),
+    "gnd": ("gnd", "Ground"),
+    "ground": ("Ground", "gnd"),
+}
+
+STANDARD_BIL_WAVEFORM = {
+    "start_time_s": 0.0,
+    "stop_time_s": 100e-6,
+    "front_time_s": 1.2e-6,
+    "time_to_half_s": 50e-6,
+}
 
 
 @dataclass
@@ -164,6 +201,59 @@ def prompt_text(prompt: str, default: str) -> str:
     return value if value else default
 
 
+def _deduplicated_aliases(requested_name: str, alias_groups: dict[str, tuple[str, ...]]) -> list[str]:
+    """Return the requested name first, followed by any equivalent aliases."""
+    requested = str(requested_name).strip()
+    if not requested:
+        return []
+
+    normalized = requested.casefold()
+    matching_group: tuple[str, ...] | None = None
+    for canonical, aliases in alias_groups.items():
+        group = (canonical, *aliases)
+        if normalized in {name.casefold() for name in group}:
+            matching_group = group
+            break
+
+    ordered = [requested, *(matching_group or ())]
+    output: list[str] = []
+    seen: set[str] = set()
+    for name in ordered:
+        key = name.casefold()
+        if key not in seen:
+            output.append(name)
+            seen.add(key)
+    return output
+
+
+def object_name_candidates(requested_name: str) -> list[str]:
+    return _deduplicated_aliases(requested_name, OBJECT_NAME_ALIASES)
+
+
+def transient_source_candidates(requested_name: str) -> list[str]:
+    return _deduplicated_aliases(requested_name, TRANSIENT_SOURCE_ALIASES)
+
+
+def voltage_name_candidates(requested_name: str) -> list[str]:
+    return _deduplicated_aliases(requested_name, VOLTAGE_NAME_ALIASES)
+
+
+def print_standard_bil_waveform_guidance() -> None:
+    """Display the standard 1.2/50 microsecond BIL impulse setup."""
+    print("\nStandard BIL waveform parameters")
+    print("--------------------------------")
+    print("  Start time:         0 s")
+    print("  Stop time:          100e-6 s (100 us)")
+    print("  Peak value:         selected BIL rating (use the required + or - polarity)")
+    print("  Front time:         1.2e-6 s (1.2 us)")
+    print("  Time to half value: 50e-6 s (50 us)")
+    print(
+        "\nIMPORTANT: Set Solver Setup > Stop Time to the same value as the "
+        "impulse stop time (standard: 100e-6 s). If the impulse stop time is "
+        "changed, update the solver stop time to match before solving."
+    )
+
+
 def get_current_model_path(ies: Any) -> Path:
     result = call_api(ies, "File_GetModelPath", "", 0, required=True)
 
@@ -246,20 +336,20 @@ def create_default_transient_manifest(path: Path) -> None:
         },
         {
             "role": "ground_shield",
-            "object_name": "shield",
+            "object_name": "gnd",
             "geometry_type": "Object",
             "geometry_id": "",
             "material": "Copper",
             "voltage_name": "gnd",
-            "voltage_mode": "static",
-            "source_name": "",
-            "static_value": 0.0,
+            "voltage_mode": "transient",
+            "source_name": "Ground",
+            "static_value": "",
             "color_r": 0,
             "color_g": 0,
             "color_b": 255,
             "active": 1,
             "assign_connected": 1,
-            "notes": "For grounded conductor or shield. Use your exact object name.",
+            "notes": "Voltage must already be attached to the ground object; the script applies Sources > Ground in transient mode.",
         },
         {
             "role": "epoxy_shell",
@@ -357,25 +447,28 @@ def resolve_geometry_id(ies: Any, assignment: PhysicsAssignment) -> Optional[int
     if not assignment.object_name:
         return None
 
-    # Preferred for model-tree objects created from named CAD/ELECTRO groups.
-    result = call_api(ies, "Object_GetObjectID", assignment.object_name, 0, required=False)
-    object_id, err = parse_id_and_error(result)
-    if object_id and err == 0:
-        return object_id
+    for candidate_name in object_name_candidates(assignment.object_name):
+        # Preferred for model-tree objects created from named CAD/ELECTRO groups.
+        result = call_api(ies, "Object_GetObjectID", candidate_name, 0, required=False)
+        object_id, err = parse_id_and_error(result)
+        if object_id and err == 0:
+            assignment.object_name = candidate_name
+            return object_id
 
-    # Backup for named geometry objects if object-tree lookup fails.
-    result = call_api(
-        ies,
-        "Geometry_GetID_FromName",
-        assignment.object_name,
-        assignment.geometry_type,
-        0,
-        0,
-        required=False,
-    )
-    geom_id, err = parse_id_and_error(result)
-    if geom_id and err == 0:
-        return geom_id
+        # Backup for named geometry objects if object-tree lookup fails.
+        result = call_api(
+            ies,
+            "Geometry_GetID_FromName",
+            candidate_name,
+            assignment.geometry_type,
+            0,
+            0,
+            required=False,
+        )
+        geom_id, err = parse_id_and_error(result)
+        if geom_id and err == 0:
+            assignment.object_name = candidate_name
+            return geom_id
 
     return None
 
@@ -389,8 +482,20 @@ def assign_material(ies: Any, assignment: PhysicsAssignment, geometry_id: Option
     success = False
     if assignment.object_name:
         # Most convenient old-format call: assigns by named object where supported.
-        result = call_api(ies, "Physics_SetMaterial", assignment.object_name, assignment.material, 0, required=False)
-        success = extract_error_code(result) == 0 if result is not None else False
+        for candidate_name in object_name_candidates(assignment.object_name):
+            result = call_api(
+                ies,
+                "Physics_SetMaterial",
+                candidate_name,
+                assignment.material,
+                0,
+                required=False,
+            )
+            success = extract_error_code(result) == 0 if result is not None else False
+            if success:
+                assignment.object_name = candidate_name
+                print(f"Material target resolved as '{candidate_name}'.")
+                break
 
     if not success and geometry_id and assignment.geometry_type.lower() == "volume":
         result = call_api(ies, "Physics_SetMaterial_ByVolume", int(geometry_id), assignment.material, 0, required=False)
@@ -406,35 +511,107 @@ def assign_material(ies: Any, assignment: PhysicsAssignment, geometry_id: Option
 def assign_voltage(ies: Any, assignment: PhysicsAssignment, geometry_id: Optional[int]) -> None:
     """Update an existing ELECTRO voltage definition by name.
 
-    This v8 workflow is intentionally model-tree based because your ELECTRO
-    template already contains voltage definitions named `source` and `gnd`, and
-    those definitions are already attached to the correct objects in the tree.
+    The voltage definition must already be attached manually to its intended
+    object. This function does not create, delete, clear, or attach voltages.
+    It applies exactly one mode-specific value:
 
-    Therefore this function does NOT delete/create/clear/reassign voltage
-    geometry. It only sets the value/source on the existing voltage definition:
+        static    -> PhysicsVoltage_SetStaticValue only
+        transient -> PhysicsVoltage_SetTransientValue only
 
-        source -> transient source named impulse
-        gnd    -> static value 0 V
-
-    This avoids the geometry-ID mismatch seen when attempting
-    PhysicsVoltage_AssignGeometry with object IDs.
+    Phasor and ambiguous/mixed modes are rejected.
     """
     if not assignment.voltage_name or assignment.voltage_mode in {"", "none", "nan"}:
         return
 
-    print(f"\n--- Voltage value update: {assignment.role} -> {assignment.voltage_name} ---")
+    mode = assignment.voltage_mode.strip().lower()
+    if mode not in {"static", "transient"}:
+        raise ValueError(
+            f"Voltage role '{assignment.role}' has unsupported mode "
+            f"'{assignment.voltage_mode}'. Use exactly 'static' or 'transient'; "
+            "phasor is not permitted in this workflow."
+        )
+
+    requested_voltage_name = assignment.voltage_name
+    attempted_voltages = voltage_name_candidates(requested_voltage_name)
+    print(f"\n--- {mode.title()} voltage value update: {assignment.role} ---")
     print(
-        "Using existing ELECTRO model-tree voltage definition. "
-        "No create/delete/clear/geometry reassignment is attempted."
+        "Using an existing, manually attached ELECTRO voltage definition. "
+        "No voltage creation, deletion, clearing, or geometry attachment is attempted."
     )
 
-    call_api(ies, "PhysicsVoltage_SetActive", assignment.voltage_name, int(assignment.active), 0, required=False)
+    selected_voltage = None
+    selected_source = None
 
+    if mode == "transient":
+        if not assignment.source_name:
+            raise ValueError(
+                f"Transient voltage role '{assignment.role}' requires a source_name."
+            )
+        attempted_sources = transient_source_candidates(assignment.source_name)
+        for candidate_voltage in attempted_voltages:
+            for candidate_source in attempted_sources:
+                result = call_api(
+                    ies,
+                    "PhysicsVoltage_SetTransientValue",
+                    candidate_voltage,
+                    candidate_source,
+                    0,
+                    required=False,
+                )
+                if extract_error_code(result) == 0:
+                    selected_voltage = candidate_voltage
+                    selected_source = candidate_source
+                    break
+            if selected_voltage is not None:
+                break
+
+        if selected_voltage is None:
+            print(
+                "WARNING: Could not apply a Transient source. Check that one of "
+                f"Voltage > {', '.join(attempted_voltages)} is manually attached "
+                f"and one of Sources > {', '.join(attempted_sources)} exists."
+            )
+            return
+
+    else:  # mode == "static"
+        value = 0.0 if assignment.static_value is None else float(assignment.static_value)
+        for candidate_voltage in attempted_voltages:
+            result = call_api(
+                ies,
+                "PhysicsVoltage_SetStaticValue",
+                candidate_voltage,
+                value,
+                0,
+                required=False,
+            )
+            if extract_error_code(result) == 0:
+                selected_voltage = candidate_voltage
+                break
+
+        if selected_voltage is None:
+            print(
+                f"WARNING: Could not apply Static value {value} V. Check that one "
+                f"of Voltage > {', '.join(attempted_voltages)} is manually attached."
+            )
+            return
+
+    assignment.voltage_name = selected_voltage
+    if selected_source is not None:
+        assignment.source_name = selected_source
+
+    call_api(
+        ies,
+        "PhysicsVoltage_SetActive",
+        selected_voltage,
+        int(assignment.active),
+        0,
+        required=False,
+    )
     if assignment.color_r is not None and assignment.color_g is not None and assignment.color_b is not None:
         call_api(
             ies,
             "PhysicsVoltage_SetColor",
-            assignment.voltage_name,
+            selected_voltage,
             int(assignment.color_r),
             int(assignment.color_g),
             int(assignment.color_b),
@@ -442,39 +619,16 @@ def assign_voltage(ies: Any, assignment: PhysicsAssignment, geometry_id: Optiona
             required=False,
         )
 
-    if assignment.voltage_mode.startswith("trans"):
-        if not assignment.source_name:
-            print(f"WARNING: Transient voltage '{assignment.voltage_name}' needs a source_name.")
-            return
-        result = call_api(
-            ies,
-            "PhysicsVoltage_SetTransientValue",
-            assignment.voltage_name,
-            assignment.source_name,
-            0,
-            required=False,
+    if mode == "transient":
+        print(
+            f"Selected Transient mode for Voltage > {selected_voltage} and assigned "
+            f"Sources > {selected_source}."
         )
-        if extract_error_code(result) != 0:
-            print(
-                f"WARNING: Could not set transient source '{assignment.source_name}' on voltage "
-                f"'{assignment.voltage_name}'. Check that the model tree contains Voltage > "
-                f"{assignment.voltage_name} and Sources > {assignment.source_name}, spelled exactly."
-            )
-        else:
-            print(f"Assigned transient source '{assignment.source_name}' to voltage '{assignment.voltage_name}'.")
-
-    elif assignment.voltage_mode.startswith("stat"):
-        value = 0.0 if assignment.static_value is None else float(assignment.static_value)
-        result = call_api(ies, "PhysicsVoltage_SetStaticValue", assignment.voltage_name, value, 0, required=False)
-        if extract_error_code(result) != 0:
-            print(
-                f"WARNING: Could not set static value {value} on voltage '{assignment.voltage_name}'. "
-                "Check that the model tree contains the exact voltage definition name."
-            )
-        else:
-            print(f"Assigned static voltage {value} V to voltage '{assignment.voltage_name}'.")
     else:
-        print(f"WARNING: Unsupported voltage_mode '{assignment.voltage_mode}' for role '{assignment.role}'.")
+        print(
+            f"Selected Static mode for Voltage > {selected_voltage} and assigned "
+            f"{float(assignment.static_value or 0.0)} V."
+        )
 
 
 
@@ -602,6 +756,7 @@ def apply_default_materials_by_name(ies: Any) -> None:
 
 def apply_transient_manifest(ies: Any, manifest_path: Path, run_solver: bool = False) -> None:
     assignments = load_transient_manifest(manifest_path)
+    validate_voltage_modes(assignments, expected_mode="transient")
     print(f"Loaded {len(assignments)} transient setup rows from: {manifest_path}")
 
     call_api(ies, "Window_SetRefresh_OFF", 0, required=False)
@@ -680,8 +835,41 @@ def build_default_electro_only_assignments(source_name: str) -> list[PhysicsAssi
     ]
 
 
-def apply_physics_assignments(ies: Any, assignments: list[PhysicsAssignment], run_solver: bool = False) -> None:
+def validate_voltage_modes(
+    assignments: list[PhysicsAssignment],
+    expected_mode: str,
+) -> None:
+    """Prevent static/transient workflows from mixing voltage value modes."""
+    expected = expected_mode.strip().lower()
+    if expected not in {"static", "transient"}:
+        raise ValueError("expected_mode must be exactly 'static' or 'transient'.")
+
+    invalid = []
+    for assignment in assignments:
+        if not assignment.voltage_name:
+            continue
+        mode = assignment.voltage_mode.strip().lower()
+        if mode != expected:
+            invalid.append(
+                f"{assignment.role}: voltage_mode={assignment.voltage_mode!r}"
+            )
+    if invalid:
+        raise ValueError(
+            f"{expected.title()} setup only permits voltage_mode='{expected}'. "
+            "Phasor and mixed static/transient assignments are not allowed: "
+            + "; ".join(invalid)
+        )
+
+
+def apply_physics_assignments(
+    ies: Any,
+    assignments: list[PhysicsAssignment],
+    run_solver: bool = False,
+    expected_voltage_mode: str | None = None,
+) -> None:
     """Apply material and voltage assignments directly to the open ELECTRO model."""
+    if expected_voltage_mode is not None:
+        validate_voltage_modes(assignments, expected_voltage_mode)
     call_api(ies, "Window_SetRefresh_OFF", 0, required=False)
     call_api(ies, "Window_SetUndo_OFF", 0, required=False)
     configure_common_electric_settings(ies)
@@ -707,7 +895,7 @@ def apply_physics_assignments(ies: Any, assignments: list[PhysicsAssignment], ru
         call_api(ies, "Window_SetRefresh_ON", 0, required=False)
         call_api(ies, "Window_Refresh", required=False)
 
-    print("\nELECTRO-only transient setup complete.")
+    print("\nELECTRO material and attached-voltage updates complete.")
 
 
 def apply_default_electro_only_transient_setup(ies: Any, run_solver: bool = False) -> None:
@@ -719,16 +907,41 @@ def apply_default_electro_only_transient_setup(ies: Any, run_solver: bool = Fals
     print("Voltages:")
     print(f"  {DEFAULT_HV_OBJECT_NAME} -> {DEFAULT_HV_VOLTAGE_NAME} -> transient source")
     print(f"  {DEFAULT_GROUND_OBJECT_NAME} -> {DEFAULT_GROUND_VOLTAGE_NAME} -> transient source {DEFAULT_TRANSIENT_GROUND_SOURCE_NAME}")
+    print(
+        "Before continuing, manually attach the HV voltage definition "
+        "(source or Voltage 1) to the conductor and the ground voltage definition "
+        "(gnd or Ground) to the ground object."
+    )
+    if not yes_no(
+        "Confirm both voltage definitions are already attached to the correct objects",
+        default=False,
+    ):
+        raise RuntimeError(
+            "Transient setup stopped. Attach the voltage definitions in ELECTRO, "
+            "then rerun transient setup."
+        )
 
     configure_common_electric_settings(ies)
     configure_transient_operation_mode(ies)
 
-    source_name = prompt_text("Existing Sources-tree impulse/source name in ELECTRO", DEFAULT_TRANSIENT_SOURCE_NAME)
+    source_name = prompt_text(
+        "Existing Sources-tree impulse/source name in ELECTRO (impulse or Source 1)",
+        DEFAULT_TRANSIENT_SOURCE_NAME,
+    )
     assignments = build_default_electro_only_assignments(source_name)
-    apply_physics_assignments(ies, assignments, run_solver=run_solver)
+    apply_physics_assignments(
+        ies,
+        assignments,
+        run_solver=run_solver,
+        expected_voltage_mode="transient",
+    )
 
 
-def build_default_electro_only_static_assignments(hv_voltage: float) -> list[PhysicsAssignment]:
+def build_default_electro_only_static_assignments(
+    hv_voltage: float,
+    hv_voltage_name: str = DEFAULT_HV_VOLTAGE_NAME,
+    ground_voltage_name: str = DEFAULT_GROUND_VOLTAGE_NAME,
+) -> list[PhysicsAssignment]:
     """Return the fixed bushing setup for a static electric simulation.
 
     Existing ELECTRO voltage definitions are addressed by their model-tree names:
@@ -744,7 +957,7 @@ def build_default_electro_only_static_assignments(hv_voltage: float) -> list[Phy
             object_name=DEFAULT_HV_OBJECT_NAME,
             geometry_type="Object",
             material=DEFAULT_MATERIAL_MAP["conductor"],
-            voltage_name=DEFAULT_HV_VOLTAGE_NAME,
+            voltage_name=hv_voltage_name,
             voltage_mode="static",
             static_value=float(hv_voltage),
             color_r=255,
@@ -757,7 +970,7 @@ def build_default_electro_only_static_assignments(hv_voltage: float) -> list[Phy
             object_name=DEFAULT_GROUND_OBJECT_NAME,
             geometry_type="Object",
             material=DEFAULT_MATERIAL_MAP["gnd"],
-            voltage_name=DEFAULT_GROUND_VOLTAGE_NAME,
+            voltage_name=ground_voltage_name,
             voltage_mode="static",
             static_value=0.0,
             color_r=0,
@@ -777,26 +990,93 @@ def build_default_electro_only_static_assignments(hv_voltage: float) -> list[Phy
 
 
 def apply_default_electro_only_static_setup(ies: Any, run_solver: bool = False) -> None:
-    """Apply materials and static named-voltage values to the open model."""
+    """Update manually attached voltage definitions using Static values only."""
     print("\nELECTRO-only static pre-simulation setup")
     print("Materials:")
     for object_name, material_name in DEFAULT_MATERIAL_MAP.items():
         print(f"  {object_name} -> {material_name}")
-    print("Static voltages:")
-    print(f"  {DEFAULT_HV_OBJECT_NAME} -> Voltage > {DEFAULT_HV_VOLTAGE_NAME} -> user-entered static voltage")
-    print(f"  {DEFAULT_GROUND_OBJECT_NAME} -> Voltage > {DEFAULT_GROUND_VOLTAGE_NAME} -> 0 V static")
-
-    hv_voltage = prompt_float(
-        "Static voltage assigned to Voltage > source (kV)",
-        DEFAULT_STATIC_HV_VOLTAGE,
+    print("Static voltage definitions:")
+    print("  conductor -> Voltage > source or Voltage 1 -> user-entered Static value")
+    print("  gnd       -> Voltage > gnd or Ground -> 0 V Static value")
+    print(
+        "Manually attach these voltage definitions to their objects before "
+        "continuing. The script updates existing definitions only."
     )
+
+    if not yes_no(
+        "Confirm the HV and ground voltage definitions are already attached",
+        default=False,
+    ):
+        raise RuntimeError(
+            "Static setup stopped. Attach the voltage definitions in ELECTRO, "
+            "then rerun static setup."
+        )
+
+    hv_voltage_name = prompt_text(
+        "Conductor voltage-definition name (source or Voltage 1)",
+        DEFAULT_HV_VOLTAGE_NAME,
+    )
+    ground_voltage_name = prompt_text(
+        "Ground voltage-definition name (gnd or Ground)",
+        DEFAULT_GROUND_VOLTAGE_NAME,
+    )
+
+    hv_voltage_kv = prompt_float(
+        "Static conductor voltage magnitude (kV)",
+        DEFAULT_STATIC_HV_VOLTAGE_KV,
+    )
+    hv_voltage_v = hv_voltage_kv
 
     configure_common_electric_settings(ies)
     configure_static_operation_and_solver(ies)
 
-    assignments = build_default_electro_only_static_assignments(hv_voltage)
-    apply_physics_assignments(ies, assignments, run_solver=run_solver)
+    assignments = build_default_electro_only_static_assignments(
+        hv_voltage_v,
+        hv_voltage_name=hv_voltage_name,
+        ground_voltage_name=ground_voltage_name,
+    )
+    apply_physics_assignments(
+        ies,
+        assignments,
+        run_solver=run_solver,
+        expected_voltage_mode="static",
+    )
     print("\nELECTRO-only static setup complete.")
+
+
+def apply_legacy_electro_only_static_setup(ies: Any, run_solver: bool = False) -> None:
+    """Retained legacy static path; disabled unless explicitly requested."""
+    print("\nLEGACY static setup workflow")
+    print(
+        "This compatibility path retains the former direct named-voltage update. "
+        "The default workflow should be used for manually attached definitions."
+    )
+    hv_voltage = prompt_float(
+        "Legacy raw static voltage value passed to ELECTRO (V)",
+        DEFAULT_STATIC_HV_VOLTAGE,
+    )
+    configure_common_electric_settings(ies)
+    configure_static_operation_and_solver(ies)
+    assignments = build_default_electro_only_static_assignments(hv_voltage)
+    apply_physics_assignments(
+        ies,
+        assignments,
+        run_solver=run_solver,
+        expected_voltage_mode="static",
+    )
+    print("\nLegacy ELECTRO-only static setup complete.")
+
+
+def run_selected_static_setup(
+    ies: Any,
+    run_solver: bool,
+    use_legacy_workflow: bool = USE_LEGACY_STATIC_ASSIGNMENT_WORKFLOW,
+) -> None:
+    """Choose the preserved legacy path only through an explicit condition."""
+    if use_legacy_workflow:
+        apply_legacy_electro_only_static_setup(ies, run_solver=run_solver)
+    else:
+        apply_default_electro_only_static_setup(ies, run_solver=run_solver)
 
 
 def run_static_solver_only(ies: Any) -> None:
@@ -1276,12 +1556,26 @@ def post_simulation_extract_and_analyze(ies: Any) -> None:
 # -----------------------------------------------------------------------------
 
 
-def main() -> None:
+def main(
+    show_bil_guidance: bool = True,
+    use_legacy_static_workflow: bool = USE_LEGACY_STATIC_ASSIGNMENT_WORKFLOW,
+) -> None:
     ies = win32com.client.Dispatch("IES.Document")
     print("Connected to ELECTRO.")
-    print("Use an open ELECTRO template model with objects named conductor, gnd, and shell.")
-    print("For transient setup, Sources > impulse and Sources > Ground must exist in the open ELECTRO model.")
-    print("For static setup, Voltage > source and Voltage > gnd must already be attached to conductor and gnd.")
+    print(
+        "Supported object names: conductor or Object 1; shell or Object 2; "
+        "gnd or Object 3."
+    )
+    print(
+        "For transient setup, Sources > impulse (or Source 1) and Sources > Ground "
+        "must exist in the open ELECTRO model."
+    )
+    print(
+        "For static setup, attach Voltage > source or Voltage 1 to the conductor "
+        "and Voltage > gnd or Ground to the ground object before running setup."
+    )
+    if show_bil_guidance:
+        print_standard_bil_waveform_guidance()
 
     while True:
         print("\nSelect mode:")
@@ -1308,10 +1602,18 @@ def main() -> None:
         elif choice == "3":
             run_transient_solver_only(ies)
         elif choice == "4":
-            apply_default_electro_only_static_setup(ies, run_solver=False)
+            run_selected_static_setup(
+                ies,
+                run_solver=False,
+                use_legacy_workflow=use_legacy_static_workflow,
+            )
             print("\nStatic pre-simulation setup complete. Solver was NOT run.")
         elif choice == "5":
-            apply_default_electro_only_static_setup(ies, run_solver=True)
+            run_selected_static_setup(
+                ies,
+                run_solver=True,
+                use_legacy_workflow=use_legacy_static_workflow,
+            )
         elif choice == "6":
             run_static_solver_only(ies)
         elif choice == "7":

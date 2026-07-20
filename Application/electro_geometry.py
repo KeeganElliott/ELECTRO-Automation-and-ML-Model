@@ -15,6 +15,12 @@ MIN_ALIGNMENT_TOLERANCE = 5.0
 SHIELD_LENGTH_TOLERANCE_FRACTION = 0.04
 SHELL_DIAMETER_TOLERANCE_FRACTION = 0.08
 
+# Diameter correction currently validated only for the 20-700-000 design.
+DIAMETER_CORRECTION_REFERENCE_MM = 63.5
+CONDUCTOR_1_5_IN_MM = 38.1
+CONDUCTOR_3_5_IN_MM = 88.9
+CONDUCTOR_MATCH_TOLERANCE_MM = 7.0
+
 
 class ElectroAPI:
     def __init__(self):
@@ -266,7 +272,61 @@ def print_relationship(label, relationship):
     print(f"relation_label: {relationship['relation_label']}")
 
 
-def main():
+def calculate_20_700_000_corrected_diameters(
+    conductor_diameter_mm,
+    shield_diameter_collected_mm,
+    shell_mean_diameter_collected_mm,
+):
+    """Return corrected shield and shell diameters for design 20-700-000."""
+    conductor_diameter_mm = float(conductor_diameter_mm)
+    shield_diameter_collected_mm = float(shield_diameter_collected_mm)
+    shell_mean_diameter_collected_mm = float(shell_mean_diameter_collected_mm)
+
+    conductor_cases = [
+        (CONDUCTOR_1_5_IN_MM, "1.5 in", 1.0),
+        (CONDUCTOR_3_5_IN_MM, "3.5 in", -1.0),
+    ]
+    nominal_mm, nominal_label, correction_sign = min(
+        conductor_cases,
+        key=lambda case: abs(conductor_diameter_mm - case[0]),
+    )
+    if abs(conductor_diameter_mm - nominal_mm) > CONDUCTOR_MATCH_TOLERANCE_MM:
+        raise ValueError(
+            "The 20-700-000 diameter correction requires a conductor diameter "
+            f"within +/-{CONDUCTOR_MATCH_TOLERANCE_MM:g} mm of 38.1 mm "
+            f"(1.5 in) or 88.9 mm (3.5 in); collected "
+            f"{conductor_diameter_mm:.3f} mm. Verify the conductor and origin segments."
+        )
+
+    correction_mm = abs(
+        DIAMETER_CORRECTION_REFERENCE_MM - conductor_diameter_mm
+    )
+    corrected_shield_mm = (
+        shield_diameter_collected_mm + correction_sign * correction_mm
+    )
+    corrected_shell_mm = (
+        shell_mean_diameter_collected_mm + correction_sign * correction_mm
+    )
+    if corrected_shield_mm <= 0 or corrected_shell_mm <= 0:
+        raise ValueError(
+            "The 20-700-000 correction produced a non-positive diameter. "
+            "Verify the selected origin, conductor, shield, and shell segments."
+        )
+
+    return {
+        "shield_diameter_mm": corrected_shield_mm,
+        "shell_mean_diameter_mm": corrected_shell_mm,
+        "shield_diameter_segment_raw_mm": shield_diameter_collected_mm,
+        "shell_mean_diameter_segment_raw_mm": shell_mean_diameter_collected_mm,
+        "diameter_correction_mm": correction_mm,
+        "diameter_correction_sign": int(correction_sign),
+        "diameter_correction_conductor_nominal_mm": nominal_mm,
+        "diameter_correction_conductor_nominal_label": nominal_label,
+        "diameter_calculation_method": "20-700-000 segment-diameter correction",
+    }
+
+
+def main(apply_20_700_diameter_correction=False):
     print("\nELECTRO geometry extraction by segment ID")
     print("-----------------------------------------")
     print("Enter six ELECTRO segment IDs:")
@@ -274,8 +334,8 @@ def main():
     print("  2. conductor")
     print("  3. shield")
     print("  4. largest-diameter shell")
-    print("  5. upper shell/shed")
-    print("  6. lower shell/shed")
+    print("  5. top shell/shed")
+    print("  6. bottom shell/shed")
     print()
     print("Physical delta convention:")
     print("  positive outward_delta_y = shed lies outward from shield bulb")
@@ -288,6 +348,12 @@ def main():
     print("  Shield is below the shed")
     print("  The in-line tolerance is scaled to shield length and shell diameter.")
     print("  Shell diameter uses the dedicated largest-diameter shell segment.")
+    if apply_20_700_diameter_correction:
+        print()
+        print("IMPORTANT: 20-700-000 diameter correction is enabled.")
+        print("This correction is currently intended only for the 20-700-000 design.")
+        print("  1.5 in conductor: add |63.5 mm - conductor diameter|")
+        print("  3.5 in conductor: subtract |63.5 mm - conductor diameter|")
     print()
 
     api = ElectroAPI()
@@ -297,8 +363,8 @@ def main():
     conductor_id = prompt_segment_id("conductor")
     shield_id = prompt_segment_id("shield")
     largest_shell_id = prompt_segment_id("largest-diameter shell")
-    upper_shell_id = prompt_segment_id("upper shell/shed")
-    lower_shell_id = prompt_segment_id("lower shell/shed")
+    upper_shell_id = prompt_segment_id("top shell/shed")
+    lower_shell_id = prompt_segment_id("bottom shell/shed")
 
     origin = api.get_reference_geometry_from_segment(origin_id, "origin")
     conductor = api.get_reference_geometry_from_segment(conductor_id, "conductor")
@@ -318,13 +384,26 @@ def main():
 
     conductor_diameter = 2.0 * abs(conductor["x"] - origin["x"])
     conductor_length = origin["y_span"]
-    shield_diameter = 2.0 * abs(shield["x"] - origin["x"])
+    shield_diameter_collected = 2.0 * abs(shield["x"] - origin["x"])
     shield_length = shield["y_span"]
 
     shell_outer_x = largest_shell["x_max"]
-    shell_diameter = 2.0 * abs(
+    shell_diameter_collected = 2.0 * abs(
         shell_outer_x - origin["x"]
     )
+
+    diameter_correction_features = {}
+    if apply_20_700_diameter_correction:
+        diameter_correction_features = calculate_20_700_000_corrected_diameters(
+            conductor_diameter,
+            shield_diameter_collected,
+            shell_diameter_collected,
+        )
+        shield_diameter = diameter_correction_features["shield_diameter_mm"]
+        shell_diameter = diameter_correction_features["shell_mean_diameter_mm"]
+    else:
+        shield_diameter = shield_diameter_collected
+        shell_diameter = shell_diameter_collected
 
     shield_upper_point = point_at_y_extreme(shield, "max")
     shield_lower_point = point_at_y_extreme(shield, "min")
@@ -353,6 +432,16 @@ def main():
     # Canonical output names match the centralized compact-vector schema.
     # Every ELECTRO coordinate-derived distance is expressed in millimetres.
     features = {
+        # Persist the manually selected ELECTRO segment IDs so the centralized
+        # application can store them with the active design profile and display
+        # them later under "Review active design".
+        "origin_segment_id": origin_id,
+        "conductor_segment_id": conductor_id,
+        "shield_segment_id": shield_id,
+        "largest_diameter_shell_segment_id": largest_shell_id,
+        "top_shed_segment_id": upper_shell_id,
+        "bottom_shed_segment_id": lower_shell_id,
+
         "conductor_diameter_mm": conductor_diameter,
         "conductor_length_mm": conductor_length,
         "shield_diameter_mm": shield_diameter,
@@ -381,6 +470,7 @@ def main():
         "bottom_bulb_distance_to_nearest_shed_mm": lower_relationship["distance"],
         "bottom_shield_to_shed_relation_code": lower_relationship["relation_code"],
     }
+    features.update(diameter_correction_features)
 
     references = {
         "origin": origin,

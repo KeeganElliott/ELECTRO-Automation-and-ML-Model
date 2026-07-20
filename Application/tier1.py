@@ -793,9 +793,9 @@ def prompt_zone_labels(n_zones: int):
     Prompt the user to assign a physical label to each temporary zone.
 
     Numeric shortcuts:
-        1 -> bottom_stress
+        1 -> top_stress
         2 -> conductor
-        3 -> top_stress
+        3 -> bottom_stress
         4 -> shield
         5 -> ignore
 
@@ -804,9 +804,9 @@ def prompt_zone_labels(n_zones: int):
     than the numeric shortcuts.
     """
     label_choices = {
-        "1": "bottom_stress",
+        "1": "top_stress",
         "2": "conductor",
-        "3": "top_stress",
+        "3": "bottom_stress",
         "4": "shield",
         "5": "ignore",
     }
@@ -823,9 +823,9 @@ def prompt_zone_labels(n_zones: int):
     }
 
     print("\nZone label options:")
-    print("  1 = bottom_stress")
+    print("  1 = top_stress")
     print("  2 = conductor")
-    print("  3 = top_stress")
+    print("  3 = bottom_stress")
     print("  4 = shield")
     print("  5 = ignore")
 
@@ -835,7 +835,7 @@ def prompt_zone_labels(n_zones: int):
         while True:
             user_entry = input(
                 f"\nEnter label number for Zone {zone} "
-                "(1=bottom, 2=conductor, 3=top, 4=shield, 5=ignore): "
+                "(1=top, 2=conductor, 3=bottom, 4=shield, 5=ignore): "
             ).strip().lower()
 
             if user_entry in label_choices:
